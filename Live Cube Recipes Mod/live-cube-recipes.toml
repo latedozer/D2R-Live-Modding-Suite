@@ -1,0 +1,13 @@
+# Live Cube Recipes: your own Horadric Cube recipes, taken in while the game runs.
+# The recipes are lines in d2rloader\live-cube-recipes\<mod>\recipes.txt (cubemain.txt columns;
+# the README.txt beside it explains adding, changing and removing). Save that file, then type
+# "recipes" in the console (Ctrl + `): the file is read then, and the cube uses its recipes.
+# It is also read once at every start. Nothing looks at the file in between.
+# The mod's own files are never changed.
+# Close the game before editing this file; changes apply on the next start.
+
+# false = the plugin does nothing (the cube has the game's recipes only)
+enabled = true
+# true = a line in the console whenever the recipes changed, and one for every line the game
+# could not read. They are always written to live-cube-recipes.log.
+console = true

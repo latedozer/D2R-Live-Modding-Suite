@@ -1,0 +1,48 @@
+# Allowlist: everything is ignored unless listed below, so new files
+# (game data, dumps, other people's code) can't be committed by accident.
+/*
+!/.gitignore
+
+# Live Cube Recipes plugin: own source, scripts, docs, tests only.
+!/Live Cube Recipes Mod/
+/Live Cube Recipes Mod/*
+!/Live Cube Recipes Mod/*.cpp
+!/Live Cube Recipes Mod/*.h
+!/Live Cube Recipes Mod/*.sh
+!/Live Cube Recipes Mod/*.rc
+!/Live Cube Recipes Mod/*.toml
+!/Live Cube Recipes Mod/*.md
+!/Live Cube Recipes Mod/test/
+
+# CascLib (MIT) and the code it bundles, with every license text.
+# See Live Cube Recipes Mod/THIRD_PARTY_NOTICES.md.
+!/Live Cube Recipes Mod/third_party/
+/Live Cube Recipes Mod/third_party/*
+!/Live Cube Recipes Mod/third_party/CascLib/
+
+# Own reference mod (source only, no zip).
+!/references/
+/references/*
+!/references/RegenCharm/
+/references/RegenCharm/*
+!/references/RegenCharm/mod.ts
+!/references/RegenCharm/mod.json
+!/references/RegenCharm/config.json
+
+# Own RE scripts (no logs, dumps, perf captures or game file lists).
+!/tools/
+/tools/*
+!/tools/*.py
+!/tools/*.sh
+!/tools/casc_extract/
+/tools/casc_extract/*
+!/tools/casc_extract/cx.c
+
+# Never, anywhere:
+*.exe
+*.dll
+*.bin
+*.zip
+*.log
+*.out
+__pycache__/

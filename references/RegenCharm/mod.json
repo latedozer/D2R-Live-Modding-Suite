@@ -1,0 +1,81 @@
+{
+  "name": "Life Regen Charm",
+  "description": "Adds '+N% of Max Life as Replenish Life' to Large Charms: three suffix tiers for magic Large Charms, plus a unique Large Charm that Gheed can sell. Overflow-safe up to a total of about 6,394% at 8,191 max life.",
+  "author": "Latedozer",
+  "version": "2.0",
+  "config": [
+    {
+      "id": "general",
+      "type": "section",
+      "name": "General",
+      "defaultExpanded": true,
+      "children": [
+        {
+          "id": "roundUp",
+          "type": "checkbox",
+          "name": "Round up",
+          "description": "The game always rounds down. This adds +1 Replenish Life to every charm to act like rounding up.",
+          "defaultValue": true
+        }
+      ]
+    },
+    {
+      "id": "tier1",
+      "type": "section",
+      "name": "Tier 1 suffix",
+      "description": "Untick to stop this tier from spawning. Charms you already own keep working.",
+      "defaultValue": true,
+      "defaultExpanded": true,
+      "children": [
+        { "id": "tier1Name", "type": "text", "name": "Suffix name", "description": "Shown on the charm, e.g. 'Large Charm of Renewal'.", "defaultValue": "of Renewal" },
+        { "id": "tier1Pct", "type": "number", "name": "% of Max Life", "description": "Fixed % on this tier (1-99).", "defaultValue": 1, "minValue": 1, "maxValue": 99 },
+        { "id": "tier1Level", "type": "number", "name": "Item level", "description": "Minimum item level for this suffix to spawn.", "defaultValue": 20, "minValue": 1, "maxValue": 99 },
+        { "id": "tier1LevelReq", "type": "number", "name": "Required level", "description": "Character level needed to use the charm.", "defaultValue": 1, "minValue": 0, "maxValue": 99 },
+        { "id": "tier1Frequency", "type": "number", "name": "Frequency", "description": "Spawn weight versus other suffixes (vanilla charm suffixes are mostly 1-4).", "defaultValue": 3, "minValue": 1, "maxValue": 100 }
+      ]
+    },
+    {
+      "id": "tier2",
+      "type": "section",
+      "name": "Tier 2 suffix",
+      "description": "Untick to stop this tier from spawning. Charms you already own keep working.",
+      "defaultValue": true,
+      "defaultExpanded": false,
+      "children": [
+        { "id": "tier2Name", "type": "text", "name": "Suffix name", "defaultValue": "of Rejuvenation" },
+        { "id": "tier2Pct", "type": "number", "name": "% of Max Life", "description": "Fixed % on this tier (1-99).", "defaultValue": 3, "minValue": 1, "maxValue": 99 },
+        { "id": "tier2Level", "type": "number", "name": "Item level", "defaultValue": 45, "minValue": 1, "maxValue": 99 },
+        { "id": "tier2LevelReq", "type": "number", "name": "Required level", "defaultValue": 30, "minValue": 0, "maxValue": 99 },
+        { "id": "tier2Frequency", "type": "number", "name": "Frequency", "defaultValue": 2, "minValue": 1, "maxValue": 100 }
+      ]
+    },
+    {
+      "id": "tier3",
+      "type": "section",
+      "name": "Tier 3 suffix",
+      "description": "Untick to stop this tier from spawning. Charms you already own keep working.",
+      "defaultValue": true,
+      "defaultExpanded": false,
+      "children": [
+        { "id": "tier3Name", "type": "text", "name": "Suffix name", "defaultValue": "of Regeneration" },
+        { "id": "tier3Pct", "type": "number", "name": "% of Max Life", "description": "Fixed % on this tier (1-99).", "defaultValue": 5, "minValue": 1, "maxValue": 99 },
+        { "id": "tier3Level", "type": "number", "name": "Item level", "defaultValue": 70, "minValue": 1, "maxValue": 99 },
+        { "id": "tier3LevelReq", "type": "number", "name": "Required level", "defaultValue": 55, "minValue": 0, "maxValue": 99 },
+        { "id": "tier3Frequency", "type": "number", "name": "Frequency", "defaultValue": 1, "minValue": 1, "maxValue": 100 }
+      ]
+    },
+    {
+      "id": "unique",
+      "type": "section",
+      "name": "Unique charm",
+      "description": "The unique always exists so charms you own stay valid; these settings change its name, value and whether Gheed sells it.",
+      "defaultExpanded": false,
+      "children": [
+        { "id": "uniqueName", "type": "text", "name": "Name", "defaultValue": "Wellspring" },
+        { "id": "uniquePct", "type": "number", "name": "% of Max Life", "description": "Fixed % on the unique (1-99).", "defaultValue": 1, "minValue": 1, "maxValue": 99 },
+        { "id": "uniqueLevelReq", "type": "number", "name": "Required level", "defaultValue": 1, "minValue": 0, "maxValue": 99 },
+        { "id": "soldByGheed", "type": "checkbox", "name": "Sold by Gheed", "description": "Gheed (Act 1) always stocks the unique Large Charm.", "defaultValue": false }
+      ]
+    }
+  ]
+}
