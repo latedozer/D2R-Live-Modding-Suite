@@ -67,3 +67,10 @@ export of the same name is replaced.
 - The whole-mod export copies every file of the mod (D2RMM: about 360 MB); it takes a moment.
 
 Settings: none. Log: `d2rloader/logs/live-export.log`.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE.txt`). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `THIRD_PARTY_NOTICES.md`.

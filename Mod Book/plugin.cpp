@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Mod Book: two side panels of the game's own kind (left: the book, right: the legend) that
 // other plugins put tabs into (mod_book_api.h). It has no content of its own.
 //

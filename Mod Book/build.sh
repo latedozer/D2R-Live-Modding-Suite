@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # Builds d2rl-mod-book.dll with mingw-w64. SDK=/path/to/PluginSDK/include ./build.sh
 # CascLib (reads the game's own button picture) is taken from Live Cube Recipes' third_party.
 set -e

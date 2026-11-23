@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # Puts the built plugin into the game's global plugin folder (or takes it out again).
 #
 #   ./install.sh          install build/d2rl-save-scan.dll

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Export: writes the mod being played, with the Live Suite's edits in it, as files.
 //
 //   * a whole mod folder:  d2rloader\live-suite\mod-export\<name>\<name>.mpq\   (copy the <name>

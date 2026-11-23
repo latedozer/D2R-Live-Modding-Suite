@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Runs the exported mod.ts the way D2RMM does (a global D2RMM with readTsv / writeTsv / readJson /
 // writeJson / getNextStringID) on the game's own tables, and compares the tables it writes with
 // what the .mpq export made of the same edits (want-*.txt from export_test).

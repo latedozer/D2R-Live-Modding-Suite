@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Export: the Live Suite's edits written into a mod's text tables, and the same edits as a
 // D2RMM mod. Text in, text out; no game calls here, so it is tested natively (test/export_test.cpp).
 //

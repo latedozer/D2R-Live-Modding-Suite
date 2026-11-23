@@ -106,3 +106,7 @@ __pycache__/
 !/Suite .dlls/*.dll
 !/Suite .dlls/*.md
 !/Suite .dlls/LICENSES/
+
+# The license of the Live Suite's own code (GNU GPL version 3).
+!/LICENSE
+!/Suite .dlls/LICENSE.txt

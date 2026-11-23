@@ -48,3 +48,10 @@ Not confirmed (no such item or case in the files):
 - in the game: the row places of save bits (+0x15), save add (+0x18) and save param bits (+0x20)
   are checked at each scan against four stats every table has (97, 188, 204, 31); the plugin
   DLL itself has never run in the game.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE` at the top of the repository). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `Live Cube Recipes Mod/THIRD_PARTY_NOTICES.md`.

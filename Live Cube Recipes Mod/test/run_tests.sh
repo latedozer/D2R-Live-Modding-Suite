@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # Builds everything and runs the checks:
 #   1. cube_core on its own (natively): the game's own cubemain files, and the list builder
 #   2. the plugin's addresses against the dump of the game image (../bin/D2RLoader_6ab3782c_dump.exe)

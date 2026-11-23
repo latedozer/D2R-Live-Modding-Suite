@@ -87,3 +87,10 @@ A D2RMM Install does not touch these files.
 A character that holds an item with a stat made by Live Properties **cannot be loaded without the
 Live Properties plugin** (or a mod exported by Live Export, which has the stat in its tables). Take
 such items off before you remove it.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE.txt`). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `THIRD_PARTY_NOTICES.md`.

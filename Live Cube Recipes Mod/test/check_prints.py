@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 """Checks plugin.cpp's addresses against a dump of the game image it was written for:
 the image stamp, every fingerprint in kPrints, and the functions the plugin calls.
 usage: check_prints.py <plugin.cpp> <image dump (file offset == RVA)>"""

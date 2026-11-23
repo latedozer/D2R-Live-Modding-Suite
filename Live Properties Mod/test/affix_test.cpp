@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // affix_core natively: rows made from the game's own MagicPrefix / MagicSuffix text (as the
 // game's loader would place the columns) read back as the same cells, and cells typed in
 // make the rows they say. usage: affix_test <excel folder with MagicPrefix.txt, MagicSuffix.txt, Properties.txt, ItemTypes.txt>

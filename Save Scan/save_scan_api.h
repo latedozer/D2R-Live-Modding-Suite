@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Save Scan: asks "does any SAVED item hold this stat?" - every character file and the shared
 // stash of the mod's save folder, read with the stat table the game holds in memory right now.
 // This header is all a plugin needs; nothing is linked.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // export_core natively, on the game's own tables (vanilla text): edits in the Live Suite's file
 // formats are written into the tables; the D2RMM mod made of the same edits is written for
 // test/run_d2rmm.mjs, which runs it against the same tables and writes what it made.

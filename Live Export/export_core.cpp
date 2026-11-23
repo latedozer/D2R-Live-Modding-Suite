@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Export: edits into text tables, and the D2RMM mod (see export_core.h).
 #include "export_core.h"
 

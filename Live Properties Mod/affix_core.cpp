@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Properties: magic affix rows as cells (see affix_core.h).
 #include "affix_core.h"
 

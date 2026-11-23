@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // prop_core against a port of the game's own linking routine (image 6ab3782c, 0x31edb3..0x31f0a3,
 // written from its disassembly): a table the "game" linked with a property's row already in it
 // must be byte for byte the table Wire() makes from one linked without it.

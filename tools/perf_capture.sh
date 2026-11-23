@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # Sample the running D2RLoader.exe (D2R) for N seconds (default 20), user-space only.
 # Output: tools/perf/<timestamp>/{perf.data,threads.txt,dsos.txt,symbols.txt,maps.txt}
 set -euo pipefail

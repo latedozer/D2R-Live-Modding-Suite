@@ -113,3 +113,10 @@ Log: `d2rloader/logs/live-properties.log`.
 - Only the character in the game is checked for carried items; other characters and the stash are
   checked only through Save Scan.
 - New property rows cannot be made yet; existing ones can be changed.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE.txt`). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `THIRD_PARTY_NOTICES.md`.

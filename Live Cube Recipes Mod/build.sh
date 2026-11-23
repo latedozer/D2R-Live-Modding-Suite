@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # Builds d2rl-live-cube-recipes.dll with mingw-w64 (Arch: pacman -S mingw-w64-gcc).
 # Needs the D2RLoader Plugin SDK headers: SDK=/path/to/PluginSDK/include ./build.sh
 set -e

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Loads the plugin the way D2RLoader does and plays the game's part:
 //  - a "game image" whose header carries the test stamp and lists the four game functions;
 //  - data tables with a recipe vector at +0x1570 per data version, filled from the game's own

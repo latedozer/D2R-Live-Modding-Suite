@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 """Linux/Proton port of d2rAI-toolkit tools/dump_image.py.
 
 Dumps the running game image (the main D2RLoader.exe module, which D2RLoader fills

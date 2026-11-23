@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Cube Recipes: your own Horadric Cube recipes, taken in while the game runs.
 //
 // The recipes are lines in a file of the plugin's own, d2rloader\live-cube-recipes\<mod>\recipes.txt

@@ -60,3 +60,10 @@ other plugins (such as Exalted Items) keep under `d2rloader`.
   Lord of Destruction characters.
 - The shared stash of the game without a mod (outside the mod's save folder) is not read.
 - If the game is updated to another build, Save Scan refuses to run and says so.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE.txt`). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `THIRD_PARTY_NOTICES.md`.

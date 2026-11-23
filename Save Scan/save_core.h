@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Save Scan: the part that reads saved items. No game, no Windows: it works on file bytes and
 // plain tables, so test/core_test.cpp can run it natively against copies of real saves.
 //

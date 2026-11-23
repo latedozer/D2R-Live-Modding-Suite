@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 """Writes legend.txt: what the `prop` command accepts and every stat of the tables the game reads.
 usage: make_legend.py [itemstatcost.txt] [strings folder]   (defaults: Exalted Items' copy, the mod's strings)
 Read only. The plugin's rules are repeated here by hand (prop_core.h, plugin.cpp)."""

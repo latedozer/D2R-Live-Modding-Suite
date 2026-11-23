@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Checks of cube_core that need no game:
 //  1. every line of the game's own cubemain.txt compiles to the record in the game's own
 //     cubemain.bin (both data sets), apart from the cells the game's parsers fill in;

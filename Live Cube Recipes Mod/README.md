@@ -267,3 +267,10 @@ changed.
 
 `backup-src-0.1.0/` is the first version, which followed the mod's own `cubemain.txt` instead;
 `backup-src-0.2.0/` checked the recipe files twice a second instead of on command.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE` at the top of the repository). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `Live Cube Recipes Mod/THIRD_PARTY_NOTICES.md`.

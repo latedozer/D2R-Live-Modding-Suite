@@ -1,5 +1,16 @@
 # Third-party notices
 
+The Live Suite's own code is free software under the GNU General Public License version 3
+(`LICENSE.txt`). The parts below are other people's work under their own licenses, all of which
+allow this use.
+
+## D2RLoader Plugin SDK
+
+Every DLL is built with the D2RLoader Plugin SDK headers (`D2RLPlugin/`).
+(c) 2026 D2RLoader contributors, MIT License, `LICENSES/D2RLoader-PluginSDK-MIT.txt`.
+
+## CascLib
+
 Three DLLs of this folder build in and statically link **CascLib**, which reads
 the game's own data: `d2rl-live-cube-recipes.dll`, `d2rl-mod-book.dll` (the
 game's button picture) and `d2rl-live-export.dll` (tables the mod has no copy

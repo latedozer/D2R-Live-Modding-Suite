@@ -102,3 +102,10 @@ files or the game's data at start.
 - A panel can only be opened in a game, not in the menus.
 - Every page change closes one panel and opens the next very quickly. You may see a short flicker.
 - D2RLoader allows a plugin 64 panels in all; Mod Book uses 32 on each side.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE.txt`). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `THIRD_PARTY_NOTICES.md`.

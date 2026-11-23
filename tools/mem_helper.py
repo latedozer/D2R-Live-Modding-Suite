@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 """Read-only memory helper for the running D2RLoader.exe (run once as root via pkexec).
 
 Serves read requests for the game process only: Claude writes tools/rpc/req.json

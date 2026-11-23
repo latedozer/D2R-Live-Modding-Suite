@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # usage: dref.py <rva>...  - find rip-relative references (lea/mov/cmp...) to data addresses in .text
 import sys,mmap,struct,os
 f=open(os.path.join(os.path.dirname(__file__),'../bin/D2RLoader_6ab3782c_dump.exe'),'rb'); m=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ)

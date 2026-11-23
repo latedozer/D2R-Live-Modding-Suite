@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Stand-in for D2RCore.dll: the two cube cell compilers, with the real ones' arguments and
 // record places (inputs 10 bytes each from +0x14, outputs 0x5b bytes each from +0x5a).
 // What they write is made up but depends on every character of the cell, the slot and the data

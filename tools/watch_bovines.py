@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 """Read-only watcher for Legacy of Terror's Hell Bovine Minions (plugin 1.0.3) in the running game.
 Needs tools/mem_helper.py running (pkexec). Logs each cow's life, mode, place and distance from the
 player over its whole life, and how it ended. usage: watch_bovines.py <log> [minutes]"""

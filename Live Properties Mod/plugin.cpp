@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Properties: the game's item tables changed while a game runs, in the game's memory. No
 // table reload, no restart, the mod's own files are never written.
 //

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 """Read-only probe for the Replenish Life drain (run as root via pkexec while in game).
 
 1. Checks that stat-op-overflow-fix.json's bytes are really in memory.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Mod Book: the two side panels (left: the book, right: the legend) that other plugins put
 // tabs into. This header is all a plugin needs; nothing is linked.
 //

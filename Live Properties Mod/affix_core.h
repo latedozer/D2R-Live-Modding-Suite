@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Properties: the game's magic affix rows (MagicPrefix, MagicSuffix, AutoMagic) as cells
 // to show and type in. No game calls here, so it is tested natively (test/affix_test.cpp).
 //

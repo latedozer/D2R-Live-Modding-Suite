@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # 1. the save reader natively, against COPIES of the saves (made here, into build/; the live
 #    files are only copied from) and the mod's tables as text
 # 2. the plugin's addresses against the dump of the game image

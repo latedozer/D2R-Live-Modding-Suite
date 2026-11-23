@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Cube Recipes: the part that knows nothing about Windows or the running game.
 //
 // It reads a recipe file (cubemain.txt columns), turns one line into the record the game keeps

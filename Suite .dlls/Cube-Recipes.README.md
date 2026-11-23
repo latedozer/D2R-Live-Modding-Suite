@@ -115,3 +115,10 @@ watches it in between.
 - If the game is updated to another build, the plugin switches itself off and the cube has the
   game's recipes. The log says so.
 - Property codes made by Live Properties cannot be used in `recipes.txt` yet.
+
+
+## License
+
+Free software: you may use, copy, change and share it, under the GNU General Public License
+version 3 (`LICENSE.txt`). Anyone who passes it on, changed or not, must pass on the source and the
+same freedoms. Copyright (C) 2026 Latedozer. Other people's parts: `THIRD_PARTY_NOTICES.md`.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Large Charm Life Regen (v2)
 //
 // Adds "+N% of Max Life as Replenish Life" to Large Charms:

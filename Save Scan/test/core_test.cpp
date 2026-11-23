@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // The save reader against COPIES of real saves (never the live files) and the mod's tables as text.
 // usage: core_test <folder with copies of .d2s/.d2i> <folder with itemstatcost/armor/weapons/misc.txt>
 #include "../save_core.h"

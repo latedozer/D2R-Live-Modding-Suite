@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Live Properties: the part that knows the game's table rows. No game, no Windows: it works on
 // plain row memory, so test/core_test.cpp can run it natively.
 //

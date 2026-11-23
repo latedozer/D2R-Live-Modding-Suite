@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // Save Scan: reads every saved item (all characters and the shared stash of the mod's save
 // folder) and says which of them hold a stat. It exists for one question other plugins must
 // ask before they change how a stat is saved: "would an item somewhere stop being readable?"

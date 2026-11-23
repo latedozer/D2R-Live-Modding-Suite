@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 """Read-only: find player units through the client unit table and dump their regen-related stats.
 Run as root (pkexec) while in game. Output: tools/probe_player.log"""
 import os, struct, traceback

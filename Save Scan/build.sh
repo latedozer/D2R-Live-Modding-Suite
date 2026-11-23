@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # Builds d2rl-save-scan.dll with mingw-w64. SDK=/path/to/PluginSDK/include ./build.sh
 set -e
 cd "$(dirname "$0")"

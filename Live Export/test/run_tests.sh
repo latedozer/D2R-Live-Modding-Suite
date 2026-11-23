@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # 1. export_core natively on the game's own tables (vanilla text): the edits into the tables
 # 2. the D2RMM mod it writes, run by node against the same tables with a stand-in D2RMM, must
 #    come out as the tables of step 1
