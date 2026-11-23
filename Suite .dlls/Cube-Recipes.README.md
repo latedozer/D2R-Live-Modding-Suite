@@ -1,4 +1,4 @@
-# Live Cube Recipes
+# Live Cube Recipes - version 0.15.0
 
 `d2rl-live-cube-recipes.dll`, version 0.15.0. A D2RLoader plugin for Diablo II: Resurrected, made
 for game build 3.4.95041 and D2RLoader 1.3.1.

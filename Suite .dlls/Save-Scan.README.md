@@ -1,4 +1,4 @@
-# Save Scan
+# Save Scan - version 0.2.0
 
 `d2rl-save-scan.dll`, version 0.2.0. A D2RLoader plugin for Diablo II: Resurrected, made for game
 build 3.4.95041 and D2RLoader 1.3.1.

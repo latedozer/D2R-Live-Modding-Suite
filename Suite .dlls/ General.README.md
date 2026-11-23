@@ -14,9 +14,11 @@ They are D2RLoader plugins, made for game build 3.4.95041 and D2RLoader 1.3.1.
 | `d2rl-live-cube-recipes.dll` | 0.15.0 | **Live Cube Recipes**: your own Horadric Cube recipe list. Add, change, switch off and remove recipes in game. |
 | `d2rl-live-properties.dll` | 0.7.0 | **Live Properties**: see and change every item property, stat and magic prefix / suffix of the game, and make new stats and affixes. |
 | `d2rl-save-scan.dll` | 0.2.0 | **Save Scan**: reads every saved item on request, so that a change that would break a saved item can be refused. |
-| `d2rl-live-export.dll` | 0.1.0 | **Live Export** (new): writes your mod with all these changes in it, as a whole mod folder or as a D2RMM mod. |
+| `d2rl-live-export.dll` | 0.2.0 | **Live Export** (new): writes your mod with all these changes in it, as a whole mod folder or as a D2RMM mod. |
 
-Each has its own README in this folder.
+Each has its own README in this folder, with the version in its title. To see which version is
+installed, look at the plugin's first line in its log (`d2rloader/logs/<plugin>.log`, e.g.
+"Mod Book 0.7.0: on"); the DLL file names never change, because the plugins find each other by them.
 
 ## How they fit together
 
