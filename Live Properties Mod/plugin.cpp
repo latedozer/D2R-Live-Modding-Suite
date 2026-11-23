@@ -1,35 +1,17 @@
-// Live Properties (proof of concept): item properties of the kind "N% of stat A is added to
-// stat B", made, changed and switched off while a game runs. No table reload, no restart.
+// Live Properties: the game's item tables changed while a game runs, in the game's memory. No
+// table reload, no restart, the mod's own files are never written.
 //
-// How: the game's stat table already has unused rows (Exalted Items fills the numbers between
-// the mod's last stat and its own with empty rows). A live property takes one of them and is
-// wired by hand the way the game wires an "op 2" stat after reading the table (prop_core.h).
-// Each property also gets a row at the end of the game's property table, so the game's own
-// property code (cube recipes, item creation) can put it on an item.
+// Tabs in the Mod Book:
+//   Properties  every row of the property table; a row's card changes its func / stat / set / val
+//   Stats       every stat; a card changes a row, New makes a stat of an empty row (Exalted Items'
+//               xlt_unused_ fillers), the op linking done the game's own way (prop_core.h)
+//   Funcs       the property funcs the game has
+//   Affixes     every magic prefix / suffix (affix_core.h); New makes one of an empty row
+// The changes are kept in d2rloader\live-suite\live-properties\<mod>\ (property-edits.txt,
+// stat-edits.txt, affix-edits.txt) and put back every time the game has read its tables.
 //
-// Console (Ctrl + `):
-//   prop                               the properties and their numbers
-//   prop set <1-8> <stat A> <stat B>   property N becomes "N% of A is added to B" (names or numbers)
-//   prop text <1-8> <words>            the line an item shows after "+N% " (default: "of A added to B")
-//   prop off <1-8>                     the property stops doing anything (items keep the stat)
-//   prop give <1-8> <percent> [code]   a test item with the property (default: small charm cm1)
-//   prop book / prop stats             the Mod Book tabs: every property of the game (left), every stat (right)
+// Console (Ctrl + `): prop | prop book | prop stats | prop funcs | prop affixes
 //
-// The Properties tab shows every row of the game's property table; a row's card lets its
-// func / stat / set / val cells be changed. The plugin's own copy of the table is what the game
-// reads, so a change counts at once for items made from then on. Changed rows are kept in
-// d2rloader\live-properties\<mod>\property-edits.txt and put back when the tables are read.
-//
-// The definitions are kept in d2rloader\live-properties\<mod>\properties.txt and put back
-// every time the game has read its tables. The mod's own files are never written.
-//
-// The item's line of text is one of eight strings the plugin gives the game at start; its
-// letters are written over in the game's memory when a property changes.
-// A change is followed by touching the property's stat on every item the character wears or
-// carries, which makes the game work the affected stats out again.
-//
-// What this build does NOT do yet: a property code usable in recipes.txt, checking saved
-// items before a change.
 
 #include <D2RLPlugin/api.h>
 
@@ -47,14 +29,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+
+#include "affix_core.h"
 #include <string>
 #include <vector>
 
 namespace {
 
-constexpr const char* kVersion = "0.4.2";
-constexpr int         kSlots   = 8;
-constexpr int         kSlotTop = 486; // property 1 is stat 486, property 2 is 485 ...
+constexpr const char* kVersion = "0.7.0";
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -101,6 +83,10 @@ constexpr uintptr_t kStatNamesAt = 0x1270;  // the stat name table in the data t
 constexpr uintptr_t kStatsAt    = 0x1258;   // the ItemStatCost vector in the data tables
 constexpr uintptr_t kPropNamesAt = 0x270;   // the property code table in the data tables (read by the cube's "mod" columns, 0x32042c)
 constexpr uintptr_t kPropsAt    = 0x240;    // the Properties vector in the data tables
+constexpr uintptr_t kAffixesAt  = 0x15e8;   // the magic affix vector: suffixes, then prefixes, then automagic (loader 0x3195c0)
+constexpr uintptr_t kAffixPrefixAt = 0x1608, kAffixAutoAt = 0x1610; // where its prefixes and its automagic rows start (pointers)
+constexpr uintptr_t kItemTypesAt = 0x1348;  // the ItemTypes vector (rows of 0xe8, the 4-letter code first; 0x318e40)
+constexpr size_t    kItemTypeRow = 0xe8;
 constexpr uintptr_t kOpFlagsRva = 0x1d996e0;
 constexpr uintptr_t kFuncCountRva = 0x2386bd8; // how many property funcs the game has (read at 0x3d4715)
 constexpr uintptr_t kFuncTableRva = 0x2386ab0; // their handlers, one pointer each; 0 = the func does nothing (0x3d46fb)
@@ -156,7 +142,13 @@ constexpr Print kPrints[] = {
 	{ 0x3d4715, "the property func count's place", false, 6, { 0x3b, 0x0d, 0xbd, 0x24, 0xfb, 0x01 } },
 	{ 0x3d46fb, "the property func table's place", false, 7, { 0x48, 0x8d, 0x15, 0xae, 0x23, 0xfb, 0x01 } },
 	{ 0x3d326d, "the property table's place", false, 7, { 0x48, 0x81, 0xc7, 0x40, 0x02, 0x00, 0x00 } },
-	{ 0x2fd1dc, "the property table's unload check", false, 7, { 0x4c, 0x39, 0xb7, 0x50, 0x02, 0x00, 0x00 } },
+	{ 0x319e4c, "the affix table's place", false, 7, { 0x49, 0x8d, 0x8e, 0xe8, 0x15, 0x00, 0x00 } },
+	{ 0x319e9f, "the affix table's prefix start", false, 7, { 0x49, 0x89, 0x8e, 0x08, 0x16, 0x00, 0x00 } },
+	{ 0x319ec7, "the affix table's automagic start", false, 7, { 0x49, 0x89, 0x8e, 0x10, 0x16, 0x00, 0x00 } },
+	{ 0x319f1d, "the affix row size", false, 11, { 0x49, 0x69, 0xbe, 0xf0, 0x15, 0x00, 0x00, 0x8c, 0x00, 0x00, 0x00 } },
+	{ 0x319f6e, "the affix name's string number", false, 4, { 0x66, 0x89, 0x43, 0x20 } },
+	{ 0x318e40, "the item type table's place", false, 7, { 0x48, 0x8d, 0xbe, 0x48, 0x13, 0x00, 0x00 } },
+	{ 0x318eab, "the item type row size", false, 8, { 0x48, 0x69, 0x7f, 0x08, 0xe8, 0x00, 0x00, 0x00 } },
 	{ kOpFlagsRva, "the op flag values", false, 16, { 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00 } },
 };
 bool g_printsChecked = false;
@@ -229,7 +221,26 @@ std::string Narrow(const std::wstring& text) {
 	return out;
 }
 
-// <loader folder>\live-properties\<mod>: beside the plugins folder. Never inside a mod's .mpq.
+std::string g_moved; // set when the folder was moved from the old place (logged at start)
+// d2rloader\live-suite\<plugin>\<mod> (every plugin of the Live Suite keeps its files under
+// live-suite). A folder in the old place, d2rloader\<plugin>\<mod>, is moved there once.
+std::wstring SuiteFolder(const std::wstring& loader, const wchar_t* plugin, const std::wstring& mod, std::string& moved) {
+	const std::wstring now = loader + L"\\live-suite\\" + plugin + L"\\" + mod, old = loader + L"\\" + plugin + L"\\" + mod;
+	const DWORD        was = GetFileAttributesW(old.c_str());
+	if (GetFileAttributesW(now.c_str()) == INVALID_FILE_ATTRIBUTES && was != INVALID_FILE_ATTRIBUTES && (was & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+		CreateDirectoryW((loader + L"\\live-suite").c_str(), nullptr);
+		CreateDirectoryW((loader + L"\\live-suite\\" + plugin).c_str(), nullptr);
+		if (MoveFileExW(old.c_str(), now.c_str(), 0)) {
+			RemoveDirectoryW((loader + L"\\" + plugin).c_str()); // only goes when empty
+			moved = "moved from the old place, d2rloader\\" + std::string(plugin, plugin + wcslen(plugin)) + ", to d2rloader\\live-suite";
+		} else {
+			moved = "could not be moved from the old place (error " + std::to_string(GetLastError()) + "); a new folder is used";
+		}
+	}
+	return now;
+}
+
+// <loader folder>\live-suite\live-properties\<mod>: beside the plugins folder. Never inside a mod's .mpq.
 std::wstring OwnFolder() {
 	std::wstring loader;
 	if (g_ctx->pluginDirectory != nullptr && g_ctx->pluginDirectory[0] != L'\0') {
@@ -248,7 +259,7 @@ std::wstring OwnFolder() {
 		loader             = (slash != std::wstring::npos ? loader.substr(0, slash) : loader) + L"\\d2rloader";
 	}
 	const std::string mod = g_ctx->activeMod != nullptr && g_ctx->activeMod[0] != '\0' ? g_ctx->activeMod : "no mod";
-	return loader + L"\\live-properties\\" + Widen(mod);
+	return SuiteFolder(loader, L"live-properties", Widen(mod), g_moved);
 }
 
 void MakeFolders(const std::wstring& path) {
@@ -288,12 +299,6 @@ bool WriteOwn(const std::wstring& path, const std::string& text) {
 
 // ---------------------------------------------------------------- state
 
-struct Def { // one property, as the user typed it
-	bool        on = false;
-	std::string base, target;
-	std::string text; // the item's line after "+N% "; empty = "of <base> added to <target>"
-};
-
 struct Bank { // one data version's tables
 	uint8_t     version = 0;
 	bool        on      = false;
@@ -307,31 +312,32 @@ struct Bank { // one data version's tables
 	std::vector<uint8_t>     statOrig;              // the same for the stat table
 	const uint8_t*           statOrigOf = nullptr;  // the rows statOrig was taken from
 	std::vector<std::string> statNames, propNames; // from the game's own name tables; "" = no name
+	// the magic affixes (the Affixes tab)
+	bool                     affixOn = false;
+	Vector*                  affixes = nullptr;
+	size_t                   preBase = 0, autoBase = 0; // where the prefixes and the automagic rows start in it
+	std::vector<uint8_t>     affixOrig;                  // the rows as the game read them
+	const uint8_t*           affixOrigOf = nullptr;
+	std::vector<std::string> typeCodes;                  // item type codes by row
+	affix::Names             names;
 };
 
 SRWLOCK                  g_lock = SRWLOCK_INIT; // everything below
-Def                      g_defs[kSlots];
 Bank                     g_banks[3];
 bool                     g_setUp = false;
 std::wstring             g_folder;
 std::vector<std::string> g_say;
 
 struct Command {
-	enum Kind { List, Set, Off, Give, Text, Edit, Restore, StatEdit, StatRestore, StatNew } kind = List; // Edit: slot = property row, percent = cell, a = text
+	enum Kind { Edit, Restore, StatEdit, StatRestore, StatNew, AffixEdit, AffixRestore } kind = Edit; // Edit: slot = property row, percent = cell, a = text
 	int                                slot = 0, percent = 0;
 	std::string                        a, b;
 	D2RL::PlayerHandle                 player = D2RL::InvalidPlayerHandle;
 };
 std::vector<Command> g_commands;
 
-// The eight strings (text.json below). kTextRoom letters each: the game keeps them as they
-// were read, and the plugin writes the real text over them.
-constexpr int      kTextRoom = 90;
-constexpr uint16_t kPriority = 60;
 uint16_t           g_unknownId = 0xffff; // what the game answers for a string key it does not have
-uint16_t           g_stringIds[kSlots] = {};
-char*              g_strings[kSlots]   = {}; // the game's own copies; nullptr = not found
-std::string        g_stringsJson;
+std::string        g_stringsJson;        // the plugin's strings (text.json): the affix names of its own
 
 const D2RL::ThreadService*    g_threads   = nullptr;
 const D2RL::ItemService*      g_items     = nullptr;
@@ -344,6 +350,7 @@ std::atomic<uint64_t>         g_askedMs { 0 };
 constexpr int kStatCells = 17, kNameCell = 16, kWasCell = 17;
 using StatCells = std::array<std::string, kStatCells + 1>;
 std::map<uint16_t, StatCells> g_statEdits; // the changed and the made stats, by number
+std::map<uint16_t, std::string> g_typedKeys; // string number -> the key typed for it (string-keys.txt, for Live Export)
 
 struct Guard {
 	Guard() { AcquireSRWLockExclusive(&g_lock); }
@@ -360,49 +367,6 @@ void Say(const char* format, ...) {
 	g_say.push_back(std::string("Live Properties: ") + text);
 }
 
-uint16_t SlotStat(int slot) {
-	return static_cast<uint16_t>(kSlotTop + 1 - slot);
-}
-
-std::wstring DefsPath() {
-	return g_folder + L"\\properties.txt";
-}
-
-void ReadDefs() {
-	for (Def& def : g_defs) {
-		def = Def {};
-	}
-	std::string text;
-	if (!ReadWhole(DefsPath(), text)) {
-		return;
-	}
-	for (size_t at = 0; at < text.size();) {
-		size_t end = text.find('\n', at);
-		end        = end == std::string::npos ? text.size() : end;
-		char a[64] = "", b[64] = "", line[128] = "";
-		int  slot  = 0;
-		if (sscanf(text.substr(at, end - at).c_str(), " %d %63s %63s %127[^\r\n]", &slot, a, b, line) >= 3 && slot >= 1 && slot <= kSlots) {
-			g_defs[slot - 1] = { true, a, b, line };
-		}
-		at = end + 1;
-	}
-}
-
-void WriteDefs() {
-	std::string text = "# Live Properties: property number, the stat a percentage is taken of, the stat it is added to, the item's text.\r\n"
-	                   "# Written by the plugin (console: prop set / prop off). Read when the game has read its tables.\r\n";
-	for (int i = 0; i < kSlots; ++i) {
-		if (g_defs[i].on) {
-			text += std::to_string(i + 1) + "\t" + g_defs[i].base + "\t" + g_defs[i].target + (g_defs[i].text.empty() ? "" : "\t" + g_defs[i].text) + "\r\n";
-		}
-	}
-	MakeFolders(g_folder);
-	if (!WriteOwn(DefsPath(), text)) {
-		Say("could not write %s - the change holds until the game closes", Narrow(DefsPath()).c_str());
-	}
-}
-
-// A stat's number from what the user typed: a number, or a name the game's own table knows.
 bool StatNumber(const Bank& bank, const std::string& text, uint16_t& number) {
 	for (const auto& [made, cells] : g_statEdits) { // a name the plugin gave
 		if (!cells[kNameCell].empty() && cells[kNameCell] == text && made < bank.stats->count) {
@@ -480,34 +444,33 @@ bool LayoutHolds(const Bank& bank, int& seen) {
 	return seen > 0;
 }
 
-void LogRow(const Bank& bank, uint16_t stat) {
-	const uint8_t* row = bank.stats->rows + stat * prop::kStatRow;
-	char           text[3 * 0x60 + 1];
-	for (int i = 0; i < 0x60; ++i) {
-		snprintf(text + i * 3, 4, "%02x ", row[i]);
-	}
-	LogF("data version %d, stat %d, first bytes: %s", bank.version, stat, text);
-}
 
 // ---------------------------------------------------------------- the item's line of text
 
-std::string Placeholder(int slot) {
-	std::string text = "live property " + std::to_string(slot) + " ";
-	text.resize(kTextRoom, '.');
+// Names for affixes that are not one of the game's string keys: Name1..Name16, kNameTextRoom
+// letters each, written over like the property lines.
+constexpr int kNameSlots = 16, kNameTextRoom = 40;
+char*         g_nameStrings[kNameSlots] = {};
+uint16_t      g_nameIds[kNameSlots]     = {};
+std::string   g_nameText[kNameSlots];        // what each holds now ("" = free)
+std::map<std::string, int> g_nameSlotOf;     // affix ("prefix 9") -> its name slot
+std::string NamePlaceholder(int slot) {
+	std::string text = "live affix name " + std::to_string(slot) + " ";
+	text.resize(kNameTextRoom, '.');
 	return text;
 }
 
-// The strings file handed to the game at plugin start: keys Prop1..Prop8 in the plugin's own
+// The strings file handed to the game at plugin start: keys Name1..Name16 in the plugin's own
 // namespace, the same text for every language (a missing language shows nothing).
 void RegisterStrings(const D2RL::ResourceService* resources) {
 	static const char* const kLanguages[] = { "enUS", "zhTW", "deDE", "esES", "frFR", "itIT", "koKR", "plPL", "esMX", "jaJP", "ptBR", "ruRU", "zhCN" };
 	g_stringsJson = "[\n";
-	for (int slot = 1; slot <= kSlots; ++slot) {
-		g_stringsJson += "  { \"Key\": \"Prop" + std::to_string(slot) + "\"";
+	for (int slot = 1; slot <= kNameSlots; ++slot) {
+		g_stringsJson += "  { \"Key\": \"Name" + std::to_string(slot) + "\"";
 		for (const char* language : kLanguages) {
-			g_stringsJson += std::string(", \"") + language + "\": \"" + Placeholder(slot) + "\"";
+			g_stringsJson += std::string(", \"") + language + "\": \"" + NamePlaceholder(slot) + "\"";
 		}
-		g_stringsJson += slot < kSlots ? " },\n" : " }\n";
+		g_stringsJson += slot < kNameSlots ? " },\n" : " }\n";
 	}
 	g_stringsJson += "]\n";
 	const D2RL::Resources::ResourceRegistration resource {
@@ -538,32 +501,25 @@ void FindStrings() {
 	const View     none { nonsense, sizeof(nonsense) - 1 };
 	const uint16_t unknown = g_link.stringId(&none);
 	g_unknownId            = unknown;
-	for (int slot = 1; slot <= kSlots; ++slot) {
-		const std::string key = "live-properties:Prop" + std::to_string(slot);
+	int names = 0;
+	for (int slot = 1; slot <= kNameSlots; ++slot) {
+		const std::string key = "live-properties:Name" + std::to_string(slot);
 		const View        view { key.data(), key.size() };
 		const uint16_t    id  = g_link.stringId(&view);
 		char*             at  = id != unknown ? const_cast<char*>(g_link.stringById(id)) : nullptr;
-		const bool        was = g_strings[slot - 1] != nullptr && g_strings[slot - 1] == at; // ours from before a table reload
-		if (at == nullptr || !Readable(at, kTextRoom + 1) || (!was && memcmp(at, Placeholder(slot).c_str(), kTextRoom + 1) != 0)) {
-			LogF("text: string %s was not found as the plugin gave it (id %u, unknown = %u); property %d will show no line", key.c_str(), id, unknown, slot);
-			g_strings[slot - 1]   = nullptr;
-			g_stringIds[slot - 1] = 0;
+		const bool        was = g_nameStrings[slot - 1] != nullptr && g_nameStrings[slot - 1] == at;
+		if (at == nullptr || !Readable(at, kNameTextRoom + 1) || (!was && memcmp(at, NamePlaceholder(slot).c_str(), kNameTextRoom + 1) != 0)) {
+			g_nameStrings[slot - 1] = nullptr;
+			g_nameIds[slot - 1]     = 0;
 			continue;
 		}
-		g_strings[slot - 1]   = at;
-		g_stringIds[slot - 1] = id;
+		g_nameStrings[slot - 1] = at;
+		g_nameIds[slot - 1]     = id;
+		++names;
 	}
-}
-
-void WriteText(int slot) {
-	char* at = g_strings[slot - 1];
-	if (at == nullptr) {
-		return;
+	if (names != kNameSlots) {
+		LogF("text: %d of %d affix name strings found; affixes can use the game's own names only beyond that", names, kNameSlots);
 	}
-	const Def&  def  = g_defs[slot - 1];
-	std::string text = !def.on ? "(live property " + std::to_string(slot) + ", switched off)" : !def.text.empty() ? def.text : "of " + def.base + " added to " + def.target;
-	text.resize(text.size() < static_cast<size_t>(kTextRoom) ? text.size() : kTextRoom);
-	memcpy(at, text.c_str(), text.size() + 1);
 }
 
 // ---------------------------------------------------------------- making the game recalculate
@@ -634,18 +590,14 @@ int Recalculate(D2RL::PlayerHandle player, uint16_t stat, bool touchThem = true)
 	return touch.done;
 }
 
-// Gives the property table its extra rows: a copy of the game's table with one row per
-// property at the end, and the game's vector pointed at the copy.
-bool GrowProperties(Bank& bank) {
+// The game's property table, edited in place (its rows hold their own number first). The rows as
+// the game read them are kept for "The game's own row".
+bool TakeProperties(Bank& bank) {
 	Vector* v = bank.props;
-	if (bank.propRows != nullptr && v->rows == bank.propRows) {
-		return true; // still ours
-	}
 	if (!Readable(v->rows, v->count * prop::kPropRow) || v->count == 0 || v->count > 0x7000) {
 		bank.off = "its property table cannot be read";
 		return false;
 	}
-	// rows hold their own number first; an unused stat cell is 0xffff
 	for (uint16_t n = 0; n < 4 && n < v->count; ++n) {
 		uint16_t first;
 		memcpy(&first, v->rows + n * prop::kPropRow, 2);
@@ -654,50 +606,11 @@ bool GrowProperties(Bank& bank) {
 			return false;
 		}
 	}
-	const uint64_t base = v->count;
-	auto*          rows = static_cast<uint8_t*>(VirtualAlloc(nullptr, (base + kSlots) * prop::kPropRow, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)); // never freed: the game may hold it
-	if (rows == nullptr) {
-		bank.off = "no memory for the property table";
-		return false;
+	if (bank.propRows != v->rows || bank.propOrig.size() != v->count * prop::kPropRow) {
+		bank.propOrig.assign(v->rows, v->rows + v->count * prop::kPropRow);
 	}
-	memcpy(rows, v->rows, base * prop::kPropRow);
-	bank.propOrig.assign(rows, rows + base * prop::kPropRow);
-	for (int i = 0; i < kSlots; ++i) {
-		prop::FillProperty(rows + (base + i) * prop::kPropRow, static_cast<uint16_t>(base + i), SlotStat(i + 1));
-	}
-	v->rows       = rows; // same rows as before, so any order of these three writes is safe
-	v->capacity   = (base + kSlots) | kNotOwned;
-	v->count      = base + kSlots;
-	bank.propRows = rows;
-	bank.propBase = base;
-	return true;
-}
-
-bool Apply(Bank& bank, int slot, std::string& problem) {
-	const Def&     def = g_defs[slot - 1];
-	const uint16_t s   = SlotStat(slot);
-	if (!def.on) {
-		prop::Unwire(bank.stats->rows, bank.stats->count, s);
-		return true;
-	}
-	uint16_t a = 0, t = 0;
-	if (!StatNumber(bank, def.base, a)) {
-		problem = "there is no stat named '" + def.base + "' (use a name from itemstatcost.txt, or its number)";
-		return false;
-	}
-	if (!StatNumber(bank, def.target, t)) {
-		problem = "there is no stat named '" + def.target + "' (use a name from itemstatcost.txt, or its number)";
-		return false;
-	}
-	const auto live = [](uint16_t stat) { return stat >= kSlotTop + 1 - kSlots && stat <= kSlotTop; };
-	if (live(a) || live(t)) {
-		problem = "neither stat can be a live property's own";
-		return false;
-	}
-	if (!prop::Wire(bank.stats->rows, bank.stats->count, s, a, t, problem)) {
-		LogRow(bank, s);
-		return false;
-	}
+	bank.propRows = v->rows;
+	bank.propBase = v->count;
 	return true;
 }
 
@@ -965,10 +878,6 @@ constexpr Field kFields[kNameCell] = {
 	{ "op stat 3", prop::kOpStat + 4, 2, kCellStat, 0, 0, kGroupOp, "A third one." },
 };
 
-bool IsLiveSlot(uint16_t stat) {
-	return stat > kSlotTop - kSlots && stat <= kSlotTop;
-}
-
 long FieldValue(const uint8_t* row, const Field& field) {
 	if (field.size == 1) {
 		return row[field.at];
@@ -992,13 +901,8 @@ StatCells StatRowCells(const Bank& bank, const uint8_t* row) {
 	return cells;
 }
 
-// Is this string number one the table already shows (or one of the plugin's eight)?
+// Is this string number one the table already shows?
 bool StringInUse(const Bank& bank, uint16_t id) {
-	for (const uint16_t own : g_stringIds) {
-		if (own != 0 && own == id) {
-			return true;
-		}
-	}
 	for (size_t i = 0; i < bank.stats->count; ++i) {
 		uint16_t pos, neg;
 		memcpy(&pos, bank.stats->rows + i * prop::kStatRow + prop::kDescStrPos, 2);
@@ -1036,7 +940,8 @@ bool BuildStatRow(const Bank& bank, uint16_t stat, const StatCells& cells, uint8
 				problem = std::string(field.name) + ": the game has no string with the key '" + text + "'";
 				return false;
 			}
-			value = id;
+			value          = id;
+			g_typedKeys[id] = text; // the stat card keeps numbers; an export needs the key
 		} else if (!Whole(text, field.least, field.most, value)) {
 			problem = std::string(field.name) + " is a number from " + std::to_string(field.least) + " to " + std::to_string(field.most);
 			return false;
@@ -1107,7 +1012,6 @@ bool GroupDiffers(const uint8_t* a, const uint8_t* b, int group) {
 
 // Makes the stat's row what the cells say, with the safeguards:
 //  * everything is checked before anything is written;
-//  * the 8 live property rows are not touched here;
 //  * the save shape does not change while the character wears or carries an item with the stat;
 //  * an op is unlinked, the game made to work its targets out again, then linked anew - the
 //    game's own way (prop_core LinkOp), with its limits (16 additions, 64 dependents);
@@ -1116,10 +1020,6 @@ bool GroupDiffers(const uint8_t* a, const uint8_t* b, int group) {
 bool ApplyStat(Bank& bank, uint16_t stat, const StatCells& cells, D2RL::PlayerHandle player, bool items, std::string& problem, int* unchecked) {
 	if (stat >= bank.stats->count) {
 		problem = "there is no stat " + std::to_string(stat);
-		return false;
-	}
-	if (IsLiveSlot(stat)) {
-		problem = "this row is a live property's own (console: prop set / prop text / prop off)";
 		return false;
 	}
 	uint8_t* rows = bank.stats->rows;
@@ -1262,6 +1162,11 @@ void WriteStatEdits() {
 	if (!WriteOwn(StatEditsPath(), text)) {
 		Say("could not write %s - the change holds until the game closes", Narrow(StatEditsPath()).c_str());
 	}
+	std::string keys = "# Live Properties: string keys typed into stat cells, by the number the game gave them (for Live Export).\r\n";
+	for (const auto& [id, key] : g_typedKeys) {
+		keys += std::to_string(id) + "\t" + key + "\r\n";
+	}
+	static_cast<void>(WriteOwn(g_folder + L"\\string-keys.txt", keys));
 }
 
 std::string GameStatName(const Bank& bank, uint16_t stat) {
@@ -1290,22 +1195,312 @@ void ApplyStatEdits(Bank& bank) {
 void BuildViews();
 void RunEdit(const Command& command);
 void RunStat(const Command& command);
+void RunAffix(const Command& command);
 
 // Looks at the tables as they are now and puts every saved property back. Game thread, or the
 // tables-read notice.
+// ---------------------------------------------------------------- the magic affixes (the Affixes tab)
+//
+// Every prefix and suffix row can be changed, and an empty row made into a new affix. A recipe
+// forces one with pre=N / suf=N (N = its number among the prefixes or suffixes, the first row 0);
+// the game takes a forced affix only if it may roll at all: spawnable 1, frequency above 0, its
+// level reached, and the item's type among its itypes. A charm always gets at least one affix.
+// Saved items keep their stats and only name their affixes by number, so a changed row changes
+// the name existing items show and nothing else.
+
+enum AffixKind { kSuffixes, kPrefixes, kAutomagic };
+const char* const kAffixKinds[] = { "suffix", "prefix", "automagic" };
+
+struct AffixEdit {
+	int          kind  = kPrefixes;
+	size_t       index = 0;
+	std::string  was;  // the row's name as the game read it ("" = an empty row): a line only counts on that row
+	affix::Cells cells;
+};
+std::map<std::string, AffixEdit> g_affixEdits; // by "prefix 9"
+
+std::string AffixKey(int kind, size_t index) {
+	return std::string(kAffixKinds[kind]) + " " + std::to_string(index);
+}
+
+// A row of the vector: its kind and its number among that kind; and back.
+void AffixPlace(const Bank& bank, size_t row, int& kind, size_t& index) {
+	kind  = row < bank.preBase ? kSuffixes : row < bank.autoBase ? kPrefixes : kAutomagic;
+	index = row - (kind == kSuffixes ? 0 : kind == kPrefixes ? bank.preBase : bank.autoBase);
+}
+bool AffixRowOf(const Bank& bank, int kind, size_t index, size_t& row) {
+	const size_t first = kind == kSuffixes ? 0 : kind == kPrefixes ? bank.preBase : bank.autoBase;
+	const size_t end   = kind == kSuffixes ? bank.preBase : kind == kPrefixes ? bank.autoBase : bank.affixes->count;
+	row                = first + index;
+	return bank.affixOn && row < end;
+}
+
+std::string RowName(const uint8_t* row) {
+	return std::string(reinterpret_cast<const char*>(row), strnlen(reinterpret_cast<const char*>(row), affix::kNameRoom - 1));
+}
+const uint8_t* AffixOrig(const Bank& bank, size_t row) {
+	return (row + 1) * affix::kRow <= bank.affixOrig.size() ? bank.affixOrig.data() + row * affix::kRow : nullptr;
+}
+
+// A row's cells; a name the plugin gave shows its words.
+affix::Cells AffixCells(const Bank& bank, size_t row) {
+	affix::Cells cells = affix::Read(bank.affixes->rows + row * affix::kRow, bank.names);
+	const std::string own = "live-properties:Name";
+	if (cells[affix::kNameCell].rfind(own, 0) == 0) {
+		const int slot = atoi(cells[affix::kNameCell].c_str() + own.size());
+		cells[affix::kNameCell] = slot >= 1 && slot <= kNameSlots ? g_nameText[slot - 1] : "";
+	}
+	return cells;
+}
+
+void FreeName(const std::string& key) {
+	if (const auto at = g_nameSlotOf.find(key); at != g_nameSlotOf.end()) {
+		g_nameText[at->second].clear();
+		g_nameSlotOf.erase(at);
+	}
+}
+
+// The name cell into a string key and its number: the row's own name, one of the game's keys,
+// or the plugin's own string with these words.
+bool NameFor(const Bank& bank, size_t row, const std::string& rowKey, const std::string& text, std::string& key, uint16_t& id, std::string& problem) {
+	const uint8_t* orig = AffixOrig(bank, row);
+	if (orig != nullptr && text == RowName(orig)) {
+		key = text;
+		memcpy(&id, orig + affix::kNameId, 2);
+		FreeName(rowKey);
+		return true;
+	}
+	struct View {
+		const char* text;
+		size_t      length;
+	};
+	const View view { text.data(), text.size() };
+	if (!text.empty() && text.size() < affix::kNameRoom && g_link.stringId != nullptr && g_link.stringId(&view) != g_unknownId) {
+		key = text, id = g_link.stringId(&view);
+		FreeName(rowKey);
+		return true;
+	}
+	if (text.empty()) {
+		key.clear(), id = g_unknownId;
+		FreeName(rowKey);
+		return true;
+	}
+	if (text.size() > static_cast<size_t>(kNameTextRoom) || text.find('"') != std::string::npos) {
+		problem = "a name of your own has at most " + std::to_string(kNameTextRoom) + " letters";
+		return false;
+	}
+	int slot = -1;
+	if (const auto at = g_nameSlotOf.find(rowKey); at != g_nameSlotOf.end()) {
+		slot = at->second;
+	}
+	for (int i = 0; i < kNameSlots && slot < 0; ++i) {
+		if (g_nameStrings[i] != nullptr && g_nameText[i].empty()) {
+			bool taken = false;
+			for (const auto& [other, used] : g_nameSlotOf) {
+				taken = taken || used == i;
+			}
+			slot = taken ? -1 : i;
+		}
+	}
+	if (slot < 0 || g_nameStrings[slot] == nullptr) {
+		problem = "'" + text + "' is not one of the game's names, and the plugin's " + std::to_string(kNameSlots) + " names of its own are all in use";
+		return false;
+	}
+	g_nameSlotOf[rowKey] = slot;
+	g_nameText[slot]     = text;
+	memcpy(g_nameStrings[slot], text.c_str(), text.size() + 1);
+	key = "live-properties:Name" + std::to_string(slot + 1);
+	id  = g_nameIds[slot];
+	return true;
+}
+
+// Writes the cells into the game's row. Everything is checked first; on false nothing was written.
+bool PutAffix(Bank& bank, size_t row, const affix::Cells& cells, std::string& problem) {
+	int    kind  = 0;
+	size_t index = 0;
+	AffixPlace(bank, row, kind, index);
+	uint8_t* at = bank.affixes->rows + row * affix::kRow;
+	uint8_t  next[affix::kRow];
+	memcpy(next, at, sizeof(next));
+	if (!affix::Build(cells, bank.names, next, problem)) {
+		return false;
+	}
+	std::string key;
+	uint16_t    id = 0;
+	if (!NameFor(bank, row, AffixKey(kind, index), cells[affix::kNameCell], key, id, problem)) {
+		return false;
+	}
+	memset(next, 0, affix::kNameRoom);
+	memcpy(next, key.data(), key.size() < affix::kNameRoom - 1 ? key.size() : affix::kNameRoom - 1);
+	memcpy(next + affix::kNameId, &id, 2);
+	memcpy(at, next, sizeof(next));
+	return true;
+}
+
+// Finds the tables of one data version. False: the Affixes tab shows nothing for it.
+bool AffixSetUp(Bank& bank) {
+	auto* tables  = static_cast<uint8_t*>(bank.tables);
+	bank.affixOn  = false;
+	bank.affixes  = reinterpret_cast<Vector*>(tables + kAffixesAt);
+	uint8_t* pre  = nullptr;
+	uint8_t* aut  = nullptr;
+	memcpy(&pre, tables + kAffixPrefixAt, sizeof(pre));
+	memcpy(&aut, tables + kAffixAutoAt, sizeof(aut));
+	const Vector& v = *bank.affixes;
+	if (v.count == 0 || v.count > 20000 || !Readable(v.rows, v.count * affix::kRow) || pre < v.rows || aut < pre || aut > v.rows + v.count * affix::kRow
+		|| (pre - v.rows) % affix::kRow != 0 || (aut - v.rows) % affix::kRow != 0) {
+		LogF("data version %d: the affix table is not where the plugin expects it; no Affixes tab for it", bank.version);
+		return false;
+	}
+	const auto* types = reinterpret_cast<const Vector*>(tables + kItemTypesAt);
+	if (types->count == 0 || types->count > 5000 || !Readable(types->rows, types->count * kItemTypeRow)) {
+		LogF("data version %d: the item type table is not where the plugin expects it; no Affixes tab for it", bank.version);
+		return false;
+	}
+	bank.typeCodes.assign(types->count, std::string());
+	for (size_t i = 0; i < types->count; ++i) {
+		std::string code(reinterpret_cast<const char*>(types->rows + i * kItemTypeRow), 4);
+		while (!code.empty() && (code.back() == ' ' || code.back() == '\0')) {
+			code.pop_back();
+		}
+		bank.typeCodes[i] = code;
+	}
+	bank.preBase  = static_cast<size_t>(pre - v.rows) / affix::kRow;
+	bank.autoBase = static_cast<size_t>(aut - v.rows) / affix::kRow;
+	if (bank.affixOrigOf != v.rows || bank.affixOrig.size() != v.count * affix::kRow) {
+		bank.affixOrig.assign(v.rows, v.rows + v.count * affix::kRow);
+		bank.affixOrigOf = v.rows;
+	}
+	bank.names           = affix::Names {};
+	bank.names.props     = bank.propNames.data();
+	bank.names.propCount = bank.propNames.size();
+	bank.names.types     = bank.typeCodes.data();
+	bank.names.typeCount = bank.typeCodes.size();
+	affix::Learn(bank.affixOrig.data(), v.count, bank.names);
+	bank.affixOn = true;
+	LogF("data version %d: affixes - %zu suffixes, %zu prefixes, %zu automagic; %zu item types", bank.version, bank.preBase, bank.autoBase - bank.preBase,
+		static_cast<size_t>(v.count) - bank.autoBase, bank.typeCodes.size());
+	return true;
+}
+
+std::wstring AffixEditsPath() {
+	return g_folder + L"\\affix-edits.txt";
+}
+
+void ReadAffixEdits() {
+	g_affixEdits.clear();
+	std::string text;
+	if (!ReadWhole(AffixEditsPath(), text)) {
+		return;
+	}
+	for (size_t at = 0; at < text.size();) {
+		size_t end = text.find('\n', at);
+		end        = end == std::string::npos ? text.size() : end;
+		std::string line = text.substr(at, end - at);
+		at               = end + 1;
+		while (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		if (line.empty() || line[0] == '#') {
+			continue;
+		}
+		std::vector<std::string> parts;
+		for (size_t from = 0; from <= line.size();) {
+			size_t tab = line.find('\t', from);
+			tab        = tab == std::string::npos ? line.size() : tab;
+			parts.push_back(line.substr(from, tab - from));
+			from = tab + 1;
+		}
+		int kind = -1;
+		for (int k = 0; k < 3 && !parts.empty(); ++k) {
+			kind = parts[0] == kAffixKinds[k] ? k : kind;
+		}
+		if (parts.size() != affix::kCells + 3 || kind < 0 || parts[1].empty()) {
+			LogF("affix-edits.txt: a line was skipped (%zu cells, %d wanted): %s", parts.size(), affix::kCells + 3, line.c_str());
+			continue;
+		}
+		AffixEdit edit;
+		edit.kind  = kind;
+		edit.index = static_cast<size_t>(strtoul(parts[1].c_str(), nullptr, 10));
+		edit.was   = parts[2] == "-" ? "" : parts[2];
+		for (int i = 0; i < affix::kCells; ++i) {
+			edit.cells[static_cast<size_t>(i)] = parts[static_cast<size_t>(i + 3)] == "-" ? "" : parts[static_cast<size_t>(i + 3)];
+		}
+		g_affixEdits[AffixKey(kind, edit.index)] = edit;
+	}
+}
+
+void WriteAffixEdits() {
+	std::string text = "# Live Properties: the magic affix rows changed or made in the Affixes tab.\r\n"
+	                   "# kind (prefix / suffix / automagic), number, the row's name as the game read it, then name, spawnable, rare, level, maxlevel, levelreq, frequency, group,\r\n"
+	                   "# classspecific, class, classlevelreq, mod1code, mod1param, mod1min, mod1max, mod2..., mod3..., itype1-7, etype1-5 (- = empty). Tabs between.\r\n"
+	                   "# Written by the plugin. Read when the game has read its tables. Delete a line to get the game's own row back.\r\n";
+	for (const auto& [key, edit] : g_affixEdits) {
+		text += std::string(kAffixKinds[edit.kind]) + "\t" + std::to_string(edit.index) + "\t" + (edit.was.empty() ? "-" : edit.was);
+		for (const std::string& cell : edit.cells) {
+			text += "\t" + (cell.empty() ? std::string("-") : cell);
+		}
+		text += "\r\n";
+	}
+	MakeFolders(g_folder);
+	if (!WriteOwn(AffixEditsPath(), text)) {
+		Say("could not write %s - the change holds until the game closes", Narrow(AffixEditsPath()).c_str());
+	}
+}
+
+void ApplyAffixEdits(Bank& bank) {
+	int done = 0;
+	for (const auto& [key, edit] : g_affixEdits) {
+		size_t         row  = 0;
+		std::string    problem;
+		const uint8_t* orig = AffixRowOf(bank, edit.kind, edit.index, row) ? AffixOrig(bank, row) : nullptr;
+		if (orig == nullptr || RowName(orig) != edit.was) {
+			if (bank.version == 3) {
+				Say("affix-edits.txt: %s is not '%s' in the game's table any more; that line does nothing", key.c_str(), edit.was.empty() ? "(an empty row)" : edit.was.c_str());
+			}
+		} else if (!PutAffix(bank, row, edit.cells, problem)) {
+			Say("affix-edits.txt, data version %d, %s: %s", bank.version, key.c_str(), problem.c_str());
+		} else {
+			++done;
+		}
+	}
+	if (!g_affixEdits.empty()) {
+		LogF("data version %d: %d of %zu changed affix rows put back", bank.version, done, g_affixEdits.size());
+	}
+}
+
 void SetUp() {
 	g_setUp  = true;
 	g_folder = OwnFolder();
-	ReadDefs();
+	if (!g_moved.empty()) {
+		LogF("your files were %s", g_moved.c_str());
+		g_moved.clear();
+	}
 	ReadEdits();
 	ReadStatEdits();
+	ReadAffixEdits();
+	{
+		std::string keys;
+		if (ReadWhole(g_folder + L"\\string-keys.txt", keys)) {
+			for (size_t at = 0; at < keys.size();) {
+				size_t end = keys.find('\n', at);
+				end        = end == std::string::npos ? keys.size() : end;
+				std::string line = keys.substr(at, end - at);
+				at               = end + 1;
+				const size_t tab = line.find('\t');
+				if (!line.empty() && line[0] != '#' && tab != std::string::npos) {
+					while (!line.empty() && line.back() == '\r') {
+						line.pop_back();
+					}
+					g_typedKeys[static_cast<uint16_t>(atoi(line.c_str()))] = line.substr(tab + 1);
+				}
+			}
+		}
+	}
 	if (!CheckPrints()) {
 		return;
 	}
 	FindStrings();
-	for (int slot = 1; slot <= kSlots; ++slot) {
-		WriteText(slot);
-	}
 	for (int i = 0; i < 3; ++i) {
 		Bank& bank   = g_banks[i];
 		bank.version = static_cast<uint8_t>(i + 1);
@@ -1318,13 +1513,13 @@ void SetUp() {
 		}
 		bank.tables = tables;
 		bank.stats  = reinterpret_cast<Vector*>(tables + kStatsAt);
-		bank.props = reinterpret_cast<Vector*>(tables + kPropsAt);
-		if (bank.stats->count <= static_cast<uint64_t>(kSlotTop) || bank.stats->count > 0x8000 || !Readable(bank.stats->rows, bank.stats->count * prop::kStatRow)) {
-			bank.off = "its stat table has no rows up to " + std::to_string(kSlotTop) + " (" + std::to_string(bank.stats->count) + " rows)";
+		bank.props  = reinterpret_cast<Vector*>(tables + kPropsAt);
+		if (bank.stats->count == 0 || bank.stats->count > 0x8000 || !Readable(bank.stats->rows, bank.stats->count * prop::kStatRow)) {
+			bank.off = "its stat table cannot be read (" + std::to_string(bank.stats->count) + " rows)";
 			continue;
 		}
-		// the rows as the game read them: taken once per table (a row of ours in it = taken before)
-		if (bank.statOrigOf != bank.stats->rows || bank.statOrig.size() != bank.stats->count * prop::kStatRow || prop::IsBlank(bank.stats->rows + SlotStat(1) * prop::kStatRow)) {
+		// the rows as the game read them: taken when the table is a new one
+		if (bank.statOrigOf != bank.stats->rows || bank.statOrig.size() != bank.stats->count * prop::kStatRow) {
 			bank.statOrig.assign(bank.stats->rows, bank.stats->rows + bank.stats->count * prop::kStatRow);
 			bank.statOrigOf = bank.stats->rows;
 		}
@@ -1333,16 +1528,7 @@ void SetUp() {
 			bank.off = "its stat table is not linked the way the plugin expects";
 			continue;
 		}
-		bool free = true;
-		for (int slot = 1; slot <= kSlots && free; ++slot) {
-			const uint8_t* row = bank.stats->rows + SlotStat(slot) * prop::kStatRow;
-			if (!prop::IsBlank(row) && !prop::IsOurs(row)) {
-				bank.off = "stat " + std::to_string(SlotStat(slot)) + " is in use";
-				LogRow(bank, SlotStat(slot));
-				free = false;
-			}
-		}
-		if (!free || !GrowProperties(bank)) {
+		if (!TakeProperties(bank)) {
 			continue;
 		}
 		bank.on = true;
@@ -1350,25 +1536,11 @@ void SetUp() {
 		WalkNames(tables, kPropNamesAt, bank.propBase, bank.propNames);
 		ApplyEdits(bank);
 		ApplyStatEdits(bank);
-		int applied = 0, lines = 0;
-		for (int slot = 1; slot <= kSlots; ++slot) { // the save shape and the line of text, for every property, set or not
-			if (g_strings[slot - 1] != nullptr && prop::Shape(bank.stats->rows + SlotStat(slot) * prop::kStatRow, g_stringIds[slot - 1], kPriority)) {
-				++lines;
-			}
+		if (AffixSetUp(bank)) {
+			ApplyAffixEdits(bank);
 		}
-		if (lines != 0 && g_link.descOrder != nullptr) {
-			g_link.descOrder(bank.tables); // the game's list of stats that have a line, in the order they are shown
-		}
-		for (int slot = 1; slot <= kSlots; ++slot) {
-			std::string problem;
-			if (!Apply(bank, slot, problem)) {
-				Say("data version %d: property %d (%s -> %s) was not set up: %s", bank.version, slot, g_defs[slot - 1].base.c_str(), g_defs[slot - 1].target.c_str(), problem.c_str());
-			} else if (g_defs[slot - 1].on) {
-				++applied;
-			}
-		}
-		LogF("data version %d: on - %d op stats checked, stats %d..%d are the properties, property numbers %llu..%llu, %d set up", bank.version, seen, kSlotTop,
-			kSlotTop + 1 - kSlots, static_cast<unsigned long long>(bank.propBase), static_cast<unsigned long long>(bank.propBase + kSlots - 1), applied);
+		LogF("data version %d: on - %d op stats checked, %llu stats, %llu properties", bank.version, seen, static_cast<unsigned long long>(bank.stats->count),
+			static_cast<unsigned long long>(bank.propBase));
 	}
 	for (const Bank& bank : g_banks) {
 		if (!bank.on) {
@@ -1384,126 +1556,13 @@ void Run(const Command& command) {
 		Say("off - %s", !g_link.ok ? g_linkProblem.c_str() : g_banks[2].off.c_str());
 		return;
 	}
-	if (command.kind == Command::List) {
-		for (int slot = 1; slot <= kSlots; ++slot) {
-			const Def& def = g_defs[slot - 1];
-			uint16_t   a = 0, t = 0;
-			const bool wired = prop::IsWired(main->stats->rows + SlotStat(slot) * prop::kStatRow, &a, &t);
-			if (def.on) {
-				Say("%d: N%% of %s is added to %s  (stat %d, property number %llu%s)  text: +N%% %s", slot, def.base.c_str(), def.target.c_str(), SlotStat(slot),
-					static_cast<unsigned long long>(main->propBase + slot - 1), wired ? "" : "; NOT set up, see the log",
-					g_strings[slot - 1] != nullptr ? g_strings[slot - 1] : "(no line: string not found)");
-			} else {
-				Say("%d: free", slot);
-			}
-		}
-		return;
-	}
-	if (command.kind == Command::Text) {
-		if (!g_defs[command.slot - 1].on) {
-			Say("property %d is free; set it first", command.slot);
-			return;
-		}
-		g_defs[command.slot - 1].text = command.a;
-		WriteText(command.slot);
-		WriteDefs();
-		Say("property %d's line is now: +N%% %s%s", command.slot, g_strings[command.slot - 1] != nullptr ? g_strings[command.slot - 1] : command.a.c_str(),
-			g_strings[command.slot - 1] != nullptr ? "" : "  (not shown: the game's string was not found, see the log)");
-		return;
-	}
-	if (command.kind == Command::Set || command.kind == Command::Off) {
-		const Def before         = g_defs[command.slot - 1];
-		g_defs[command.slot - 1] = command.kind == Command::Set ? Def { true, command.a, command.b, before.on && before.base == command.a && before.target == command.b ? before.text : "" } : Def {};
-		bool        ok           = true;
-		std::string problem;
-		// First the old links go while the row still names its old target: touching the stat
-		// now makes the game work that target out again, without the property.
-		for (Bank& bank : g_banks) {
-			if (bank.on) {
-				prop::Unlink(bank.stats->rows, bank.stats->count, SlotStat(command.slot));
-			}
-		}
-		int touched = Recalculate(command.player, SlotStat(command.slot));
-		for (Bank& bank : g_banks) {
-			if (bank.on && !Apply(bank, command.slot, problem)) {
-				ok = false;
-				Say("data version %d: %s", bank.version, problem.c_str());
-			}
-		}
-		if (!ok) { // back to what it was, everywhere
-			g_defs[command.slot - 1] = before;
-			for (Bank& bank : g_banks) {
-				if (bank.on) {
-					Apply(bank, command.slot, problem);
-				}
-			}
-			static_cast<void>(Recalculate(command.player, SlotStat(command.slot)));
-			Say("property %d is unchanged", command.slot);
-			return;
-		}
-		if (command.kind == Command::Set) {
-			touched = Recalculate(command.player, SlotStat(command.slot)); // and the new target, with the property
-		}
-		WriteText(command.slot);
-		WriteDefs();
-		char after[160];
-		if (touched < 0) {
-			snprintf(after, sizeof(after), "The game was NOT made to recalculate (not possible here): move or re-equip items that have it.");
-		} else {
-			snprintf(after, sizeof(after), "Recalculated on %d item%s you wear or carry.", touched, touched == 1 ? "" : "s");
-		}
-		if (command.kind == Command::Set) {
-			Say("property %d is now: N%% of %s is added to %s. %s", command.slot, command.a.c_str(), command.b.c_str(), after);
-		} else {
-			Say("property %d is off. Items keep the stat, and it does nothing. %s", command.slot, after);
-		}
-		return;
-	}
 	if (command.kind == Command::Edit || command.kind == Command::Restore) {
 		RunEdit(command);
-		return;
-	}
-	if (command.kind == Command::StatEdit || command.kind == Command::StatRestore || command.kind == Command::StatNew) {
+	} else if (command.kind == Command::StatEdit || command.kind == Command::StatRestore || command.kind == Command::StatNew) {
 		RunStat(command);
-		return;
+	} else if (command.kind == Command::AffixEdit || command.kind == Command::AffixRestore) {
+		RunAffix(command);
 	}
-	// Give
-	if (g_items == nullptr || command.player == D2RL::InvalidPlayerHandle) {
-		Say("no test item: %s", g_items == nullptr ? "this D2RLoader has no item service" : "no character is in a game");
-		return;
-	}
-	if (!g_defs[command.slot - 1].on) {
-		Say("property %d is free; set it first (prop set %d <stat A> <stat B>)", command.slot, command.slot);
-		return;
-	}
-	char code[5] = "    ";
-	memcpy(code, command.a.data(), command.a.size() < 4 ? command.a.size() : 4);
-	const D2RL::Items::PropertySpec   property = D2RL::Items::MakeExactProperty(static_cast<uint32_t>(main->propBase + command.slot - 1), command.percent);
-	const D2RL::Items::ItemCreateSpec spec {
-		.structSize      = D2RL::Items::ItemCreateSpecSize,
-		.code            = D2RL::Items::MakeItemCode(code[0], code[1], code[2], code[3]),
-		.quality         = D2RL::Items::Quality::Magic,
-		.qualityRecordId = D2RL::Items::RandomQualityRecord,
-		.itemLevel       = 1,
-		.seedMode        = D2RL::Items::SeedMode::Random,
-		.quantity        = D2RL::Items::DefaultValue,
-		.durability      = D2RL::Items::DefaultValue,
-		.stateFlags      = D2RL::Items::ItemStateIdentified,
-		.propertyCount   = 1,
-		.properties      = &property,
-		.destination     = {
-			.structSize = D2RL::Items::ItemDestinationSize,
-			.container  = D2RL::Items::ItemContainer::Inventory,
-			.placement  = D2RL::Items::Placement::Automatic,
-		},
-	};
-	D2RL::ItemHandle item   = D2RL::InvalidItemHandle;
-	const auto       result = g_items->createItem(g_ctx, command.player, &spec, &item);
-	if (result != D2RL::Items::Result::Success) {
-		Say("the game did not make the item '%s' (result %u; 12 = not the host, 3 = no game, 4 = no room)", command.a.c_str(), static_cast<unsigned>(result));
-		return;
-	}
-	Say("made a '%s' with property %d at %d%% (stat %d) in your inventory", command.a.c_str(), command.slot, command.percent, SlotStat(command.slot));
 }
 
 // ---------------------------------------------------------------- the Mod Book tabs
@@ -1525,8 +1584,10 @@ struct ListView {
 	int         card = -1; // the row whose card is open; -1 = the list
 	int         cell = -1; // the cell being typed in
 	std::string cellText, note;
+	std::map<int, std::string> pending; // cells typed (Enter / Tab) and not saved yet: Save changes sends them to the game
 };
-ListView g_statsView, g_propsView, g_funcsView;
+ListView g_statsView, g_propsView, g_funcsView, g_affixView;
+bool     g_affixChoosing = false; // the Affixes tab asks: a new prefix or a new suffix?
 constexpr size_t kListRows = 9;
 
 // What each func does: the game's data guide's words. Which funcs exist is read from the game.
@@ -1599,6 +1660,7 @@ void BuildViews() {
 	g_statsView.entries.clear();
 	g_propsView.entries.clear();
 	g_funcsView.entries.clear();
+	g_affixView.entries.clear();
 	for (int func = 0; func < FuncCount(); ++func) {
 		Entry entry;
 		entry.row    = func;
@@ -1618,11 +1680,7 @@ void BuildViews() {
 			const bool named  = i < bank->statNames.size() && !bank->statNames[i].empty() && bank->statNames[i].rfind("xlt_unused_", 0) != 0;
 			entry.word        = StatWord(*bank, static_cast<uint16_t>(i));
 			entry.title       = std::to_string(i) + "  " + (entry.word) + (edited == g_statEdits.end() ? "" : named ? "   (changed)" : "   (made by you)");
-			const int slot    = kSlotTop + 1 - static_cast<int>(i);
-			if (slot >= 1 && slot <= kSlots) {
-				const Def& def = g_defs[slot - 1];
-				entry.detail   = "live property " + std::to_string(slot) + (def.on ? ": N% of " + def.base + " is added to " + def.target : ": free (console: prop set " + std::to_string(slot) + " <stat A> <stat B>)");
-			} else if (prop::IsBlank(row)) {
+			if (prop::IsBlank(row)) {
 				entry.detail = "an empty row: no stat uses it (the New button makes a stat of one)";
 			} else {
 				int places = 0, dependents = 0;
@@ -1657,12 +1715,7 @@ void BuildViews() {
 			const uint8_t* row = bank->propRows + i * prop::kPropRow;
 			Entry          entry;
 			entry.row = static_cast<int>(i);
-			if (i >= bank->propBase) {
-				const int  slot = static_cast<int>(i - bank->propBase) + 1;
-				const Def& def  = g_defs[slot - 1];
-				entry.title     = std::to_string(i) + "  live property " + std::to_string(slot);
-				entry.detail    = def.on ? "N% of " + def.base + " is added to " + def.target + " (console: prop set / prop text / prop off)" : "free (console: prop set " + std::to_string(slot) + " <stat A> <stat B>)";
-			} else {
+			{
 				const std::string key   = PropKey(*bank, i);
 				const Cells       cells = RowCells(*bank, row);
 				entry.title             = std::to_string(i) + "  " + key + (g_edits.count(key) != 0 ? "   (changed)" : "");
@@ -1682,12 +1735,106 @@ void BuildViews() {
 			g_propsView.entries.push_back(std::move(entry));
 		}
 	}
-	for (ListView* view : { &g_statsView, &g_propsView, &g_funcsView }) {
+	if (bank != nullptr && bank->affixOn) {
+		for (size_t i = 0; i < bank->affixes->count; ++i) {
+			int    kind  = 0;
+			size_t index = 0;
+			AffixPlace(*bank, i, kind, index);
+			const affix::Cells cells = AffixCells(*bank, i);
+			const uint8_t*     row   = bank->affixes->rows + i * affix::kRow;
+			const auto         edit  = g_affixEdits.find(AffixKey(kind, index));
+			Entry              entry;
+			entry.row   = static_cast<int>(i);
+			entry.word  = std::string(kind == kPrefixes ? "pre=" : kind == kSuffixes ? "suf=" : "") + std::to_string(index);
+			entry.title = AffixKey(kind, index) + "  " + (cells[affix::kNameCell].empty() ? "(no name)" : cells[affix::kNameCell])
+			            + (edit == g_affixEdits.end() ? "" : edit->second.was.empty() ? "   (made by you)" : "   (changed)");
+			if (affix::IsBlank(row, bank->names)) {
+				entry.detail = "an empty row: no affix uses it (New makes an affix of one)";
+			} else {
+				std::string on, mods;
+				for (int t = 0; t < 7; ++t) {
+					on += cells[static_cast<size_t>(affix::kTypeCell + t)].empty() ? "" : (on.empty() ? "" : " ") + cells[static_cast<size_t>(affix::kTypeCell + t)];
+				}
+				for (int m = 0; m < 3; ++m) {
+					const std::string* c = &cells[static_cast<size_t>(affix::kModCell + m * 4)];
+					if (!c[0].empty()) {
+						mods += (mods.empty() ? "" : ", ") + c[0] + (c[1].empty() ? "" : "(" + c[1] + ")") + " " + (c[2].empty() ? "0" : c[2]) + "-" + (c[3].empty() ? "0" : c[3]);
+					}
+				}
+				entry.detail = "level " + (cells[affix::kLevelCell].empty() ? std::string("0") : cells[affix::kLevelCell]) + ", frequency " + (cells[affix::kFrequencyCell].empty() ? std::string("0") : cells[affix::kFrequencyCell])
+				             + (cells[affix::kSpawnCell] == "1" ? "" : ", not spawnable") + (on.empty() ? "" : "; on " + on) + (mods.empty() ? "" : "; " + mods)
+				             + (kind == kAutomagic ? "" : "; recipe: " + entry.word);
+			}
+			g_affixView.entries.push_back(std::move(entry));
+		}
+	}
+	for (ListView* view : { &g_statsView, &g_propsView, &g_funcsView, &g_affixView }) {
 		Filter(*view);
 		if (view->card >= static_cast<int>(view->entries.size())) {
 			view->card = view->cell = -1;
 		}
 	}
+}
+
+// An affix's cell changed (AffixEdit) or the row back to the game's own (AffixRestore), in every
+// data version that has the same row. slot = the row in the main data version. Game thread, under the lock.
+void RunAffix(const Command& command) {
+	std::string& note = g_affixView.note;
+	Bank*        main = MainBank();
+	if (main == nullptr || !main->affixOn || command.slot < 0 || static_cast<uint64_t>(command.slot) >= main->affixes->count) {
+		note = "that affix row is not there";
+		return;
+	}
+	const size_t row  = static_cast<size_t>(command.slot);
+	int          kind = 0;
+	size_t       index = 0;
+	AffixPlace(*main, row, kind, index);
+	const std::string key = AffixKey(kind, index);
+	const uint8_t*    orig = AffixOrig(*main, row);
+	const std::string was  = orig != nullptr ? RowName(orig) : "";
+	if (command.kind == Command::AffixRestore) {
+		for (Bank& bank : g_banks) {
+			size_t         at = 0;
+			const uint8_t* own = AffixRowOf(bank, kind, index, at) ? AffixOrig(bank, at) : nullptr;
+			if (bank.on && own != nullptr && RowName(own) == was) {
+				memcpy(bank.affixes->rows + at * affix::kRow, own, affix::kRow);
+			}
+		}
+		FreeName(key);
+		g_affixEdits.erase(key);
+		WriteAffixEdits();
+		note = key + " is the game's own row again" + (was.empty() ? " (empty)." : ".");
+		LogF("affix %s: back to the game's own row", key.c_str());
+		return;
+	}
+	affix::Cells cells = AffixCells(*main, row);
+	if (command.percent < 0 || command.percent >= affix::kCells) {
+		return;
+	}
+	cells[static_cast<size_t>(command.percent)] = command.a == "-" ? "" : command.a;
+	std::string problem;
+	if (!PutAffix(*main, row, cells, problem)) {
+		note = "Not changed: " + problem;
+		return;
+	}
+	cells = AffixCells(*main, row); // as the row now reads
+	for (Bank& bank : g_banks) {
+		size_t         at = 0;
+		const uint8_t* own = &bank != main && bank.on && AffixRowOf(bank, kind, index, at) ? AffixOrig(bank, at) : nullptr;
+		if (own != nullptr && RowName(own) == was && !PutAffix(bank, at, cells, problem)) {
+			LogF("data version %d, affix %s: %s", bank.version, key.c_str(), problem.c_str());
+		}
+	}
+	if (orig != nullptr && memcmp(main->affixes->rows + row * affix::kRow, orig, affix::kRow) == 0) {
+		g_affixEdits.erase(key);
+	} else {
+		AffixEdit& edit = g_affixEdits[key];
+		edit.kind = kind, edit.index = index, edit.was = was, edit.cells = cells;
+	}
+	WriteAffixEdits();
+	note = key + ": " + affix::kFields[command.percent].name + " is now " + (cells[static_cast<size_t>(command.percent)].empty() ? "empty" : "'" + cells[static_cast<size_t>(command.percent)] + "'")
+	     + ". It counts for items made from now on.";
+	LogF("affix %s: %s", key.c_str(), note.c_str());
 }
 
 // A changed cell (Edit) or a row back to the game's own (Restore), in every data version that
@@ -1756,7 +1903,7 @@ void RunStat(const Command& command) {
 	StatCells cells;
 	if (command.kind == Command::StatNew) {
 		int free = -1;
-		for (int n = kSlotTop - kSlots; n >= 0 && free < 0; --n) {
+		for (int n = static_cast<int>(main->stats->count) - 1; n >= 0 && free < 0; --n) {
 			if (static_cast<uint64_t>(n) < main->stats->count && prop::IsBlank(main->stats->rows + n * prop::kStatRow) && g_statEdits.count(static_cast<uint16_t>(n)) == 0
 				&& (GameStatName(*main, static_cast<uint16_t>(n)).empty() || GameStatName(*main, static_cast<uint16_t>(n)).rfind("xlt_unused_", 0) == 0)) {
 				free = n;
@@ -1872,6 +2019,15 @@ void DrawList(modbook::Page* page, const ListView& view, const char* hint, const
 	g_book->pager(page, view.top > 0 ? 1 : 0, view.top + kListRows < view.found.size() ? 1 : 0, text);
 }
 
+// Save changes / Discard, while a card has cells typed and not saved (or one being typed).
+void SaveButtons(modbook::Page* page, const ListView& v) {
+	const size_t count = v.pending.size() + (v.cell >= 0 && v.pending.count(v.cell) == 0 ? 1 : 0);
+	if (count != 0) {
+		g_book->button(page, "Save", 214, 172, 300, ("Save changes (" + std::to_string(count) + ")").c_str(), "$FontColorGreen");
+		g_book->button(page, "Discard", 530, 172, 200, "Discard", "$FontColorLightRed");
+	}
+}
+
 // One property row: its 7 lines of func / stat / set / val, each cell a place to type in.
 void DrawCard(modbook::Page* page) {
 	const ListView& v    = g_propsView;
@@ -1883,12 +2039,13 @@ void DrawCard(modbook::Page* page) {
 	}
 	const size_t      row  = static_cast<size_t>(v.card);
 	const bool        own  = row < bank->propBase;
-	const std::string key  = own ? PropKey(*bank, row) : "live property " + std::to_string(row - bank->propBase + 1);
+	const std::string key  = PropKey(*bank, row);
 	const Cells       cells = RowCells(*bank, bank->propRows + row * prop::kPropRow);
 	g_book->title(page, ("Property " + std::to_string(row) + ": " + key).c_str());
 	if (own && g_edits.count(key) != 0) {
 		g_book->button(page, "Restore", 742, 172, 330, "The game's own row", "$FontColorLightRed");
 	}
+	SaveButtons(page, v);
 	static const char* const columns[] = { "func", "stat", "set", "val" };
 	static const char* const tips[]    = { "func: what the line does (a number from the Funcs tab; empty = the line does nothing)", "stat: the stat the line works on (a name from the Stats tab, or its number)",
 		"set: 1 on the lines the game marks so; leave it as the game has it unless you know the func", "val: a fixed number some funcs use (func 21: which group of skills)" };
@@ -1904,8 +2061,10 @@ void DrawCard(modbook::Page* page) {
 			const int         cell = line * 4 + c;
 			const std::string name = "Cell" + std::to_string(cell);
 			const bool        typing = cell == v.cell;
-			const std::string text   = typing ? v.cellText + "_" : cells[static_cast<size_t>(cell)].empty() ? "-" : cells[static_cast<size_t>(cell)];
-			g_book->label(page, ("Text" + name).c_str(), xs[c], y, widths[c], 36, typing ? "$FontColorWhite" : "$FontColorLightGold", "left", 0, Cut(text, c == 1 ? 28 : 9).c_str());
+			const auto        typed  = v.pending.find(cell);
+			const std::string now    = typed != v.pending.end() ? typed->second + "*" : cells[static_cast<size_t>(cell)];
+			const std::string text   = typing ? v.cellText + "_" : now.empty() ? "-" : now;
+			g_book->label(page, ("Text" + name).c_str(), xs[c], y, widths[c], 36, typing ? "$FontColorWhite" : typed != v.pending.end() ? "$FontColorGreen" : "$FontColorLightGold", "left", 0, Cut(text, c == 1 ? 28 : 9).c_str());
 			if (own) {
 				g_book->spot(page, ("Spot" + name).c_str(), xs[c], y, widths[c] - 10, 40, name.c_str(), tips[c]);
 			}
@@ -1915,9 +2074,9 @@ void DrawCard(modbook::Page* page) {
 	}
 	g_book->label(page, "Note", 82, 1000, 990, 100, "$FontColorGreen", "left", 1, v.note.c_str());
 	g_book->label(page, "Help", 82, 1110, 990, 180, "$FontColorGoldYellow", "left", 1,
-		own ? "Click a cell, type, Enter sets it (Tab: sets it and goes to the next cell, Esc: leaves it). With a func or stat cell open, a click in the Funcs or Stats tab (Ctrl+L) puts it in. "
-		      "A change counts at once for items made from now on; items that exist keep the stats they have."
-		    : "This row is a live property's own. Change it in the console: prop set / prop text / prop off.");
+		own ? "Click a cell, type, Enter keeps it (Tab: keeps it and goes to the next cell, Esc: leaves it); kept cells show green with a *. Save changes sends them to the game. With a func or stat cell open, a click in the Funcs or Stats tab puts it in. "
+		      "Saved changes count for items made from then on; items that exist keep the stats they have."
+		    : "");
 }
 
 // One stat row: 16 cells of it, and the plugin's name for a stat the game has no name for.
@@ -1931,7 +2090,7 @@ void DrawStatCard(modbook::Page* page) {
 	}
 	const uint16_t  stat   = static_cast<uint16_t>(v.card);
 	const uint8_t*  row    = bank->stats->rows + stat * prop::kStatRow;
-	const bool      live   = IsLiveSlot(stat);
+	const bool      live   = false;
 	const auto      edited = g_statEdits.find(stat);
 	const bool      named  = !GameStatName(*bank, stat).empty() && GameStatName(*bank, stat).rfind("xlt_unused_", 0) != 0;
 	StatCells       cells  = StatRowCells(*bank, row);
@@ -1940,6 +2099,7 @@ void DrawStatCard(modbook::Page* page) {
 	if (edited != g_statEdits.end()) {
 		g_book->button(page, "Restore", 742, 172, 330, named ? "The game's own row" : "Remove this stat", "$FontColorLightRed");
 	}
+	SaveButtons(page, v);
 	static const char* const groups[] = { "saved", "text", "op" };
 	for (int i = 0; i < kStatCells; ++i) {
 		if (i == kNameCell && named) {
@@ -1948,28 +2108,92 @@ void DrawStatCard(modbook::Page* page) {
 		const int         y      = 268 + i * 54;
 		const std::string n      = std::to_string(i);
 		const bool        typing = i == v.cell;
-		const std::string text   = typing ? v.cellText + "_" : cells[static_cast<size_t>(i)].empty() ? "-" : cells[static_cast<size_t>(i)];
+		const auto        typed  = v.pending.find(i);
+		const std::string now    = typed != v.pending.end() ? typed->second + "*" : cells[static_cast<size_t>(i)];
+		const std::string text   = typing ? v.cellText + "_" : now.empty() ? "-" : now;
 		std::string       hint   = i == kNameCell ? "your name for it (used in the lists and in stat cells)" : groups[kFields[i].group];
 		if (i < kNameCell && kFields[i].kind == kCellString) {
 			const std::string words = StringText(static_cast<uint16_t>(FieldValue(row, kFields[i])));
 			hint                    = words.empty() ? hint : "\"" + words + "\"";
 		}
 		g_book->label(page, ("Name" + n).c_str(), 82, y, 300, 36, "$FontColorGoldYellow", "left", 0, i == kNameCell ? "name" : kFields[i].name);
-		g_book->label(page, ("Text" + n).c_str(), 390, y, 330, 36, typing ? "$FontColorWhite" : "$FontColorLightGold", "left", 0, Cut(text, 19).c_str());
+		g_book->label(page, ("Text" + n).c_str(), 390, y, 330, 36, typing ? "$FontColorWhite" : typed != v.pending.end() ? "$FontColorGreen" : "$FontColorLightGold", "left", 0, Cut(text, 19).c_str());
 		g_book->label(page, ("Hint" + n).c_str(), 730, y, 340, 36, "$FontColorGoldYellow", "left", 0, Cut(hint, 20).c_str());
 		if (!live) {
 			g_book->spot(page, ("Spot" + n).c_str(), 82, y, 980, 50, ("Cell" + n).c_str(),
 				i == kNameCell ? "The plugin's own name for a stat you made. The game does not know it; this plugin's lists and cells do." : kFields[i].tip);
 		}
 	}
-	g_book->label(page, "Note", 82, 268 + kStatCells * 54 + 8, 990, 130, live ? "$FontColorGoldYellow" : "$FontColorGreen", "left", 1,
-		live ? "This row is a live property's own. Change it in the console: prop set / prop text / prop off."
-		     : v.note.empty() ? "Click a line, type, Enter sets it (Tab: next line, Esc: leaves it). Hover a line for what it means. 'saved' lines are refused while you carry an item with the stat." : v.note.c_str());
+	g_book->label(page, "Note", 82, 268 + kStatCells * 54 + 8, 990, 130, "$FontColorGreen", "left", 1,
+		v.note.empty() ? "Click a line, type, Enter keeps it (Tab: next line, Esc: leaves it); kept lines show green with a *. Save changes sends them to the game. Hover a line for what it means. 'saved' lines are refused while you carry an item with the stat." : v.note.c_str());
+}
+
+// One affix row: 35 cells in two columns, the three ways to keep a made affix (off drops or not), and the recipe word.
+void DrawAffixCard(modbook::Page* page) {
+	const ListView& v    = g_affixView;
+	const Bank*     bank = MainBank();
+	g_book->button(page, "Back", 82, 172, 116, "Back", "$FontColorWhite");
+	if (bank == nullptr || !bank->affixOn || v.card < 0 || static_cast<uint64_t>(v.card) >= bank->affixes->count) {
+		g_book->label(page, "Gone", 82, 300, 990, 36, "$FontColorLightRed", "left", 0, "The game's tables are not there right now.");
+		return;
+	}
+	int    kind  = 0;
+	size_t index = 0;
+	AffixPlace(*bank, static_cast<size_t>(v.card), kind, index);
+	const affix::Cells cells  = AffixCells(*bank, static_cast<size_t>(v.card));
+	const auto         edited = g_affixEdits.find(AffixKey(kind, index));
+	g_book->title(page, (std::string(kind == kPrefixes ? "Prefix " : kind == kSuffixes ? "Suffix " : "Automagic ") + std::to_string(index) + (cells[affix::kNameCell].empty() ? "" : ": " + cells[affix::kNameCell])).c_str());
+	if (edited != g_affixEdits.end()) {
+		g_book->button(page, "Restore", 742, 172, 330, edited->second.was.empty() ? "Remove this affix" : "The game's own row", "$FontColorLightRed");
+	}
+	SaveButtons(page, v);
+	constexpr int kPerColumn = 18;
+	for (int i = 0; i < affix::kCells; ++i) {
+		const bool         right  = i >= kPerColumn;
+		const int          y      = 268 + (right ? i - kPerColumn : i) * 48;
+		const int          x      = right ? 585 : 82;
+		const std::string  n      = std::to_string(i);
+		const bool         typing = i == v.cell;
+		const auto         typed  = v.pending.find(i);
+		const std::string  now    = typed != v.pending.end() ? typed->second + "*" : cells[static_cast<size_t>(i)];
+		const std::string  text   = typing ? v.cellText + "_" : now.empty() ? "-" : now;
+		g_book->label(page, ("Name" + n).c_str(), x, y, 170, 36, "$FontColorGoldYellow", "left", 0, affix::kFields[i].name);
+		g_book->label(page, ("Text" + n).c_str(), x + 175, y, right ? 310 : 300, 36, typing ? "$FontColorWhite" : typed != v.pending.end() ? "$FontColorGreen" : "$FontColorLightGold", "left", 0,
+			Cut(text, i == affix::kNameCell ? 17 : 16).c_str());
+		g_book->spot(page, ("Spot" + n).c_str(), x, y, 480, 44, ("Cell" + n).c_str(), affix::kFields[i].tip);
+	}
+	g_book->button(page, "CubeOnly", 82, 1140, 300, "Cube only", "$FontColorLightTeal");
+	g_book->button(page, "RareDrops", 412, 1140, 300, "Rare drops", "$FontColorLightTeal");
+	g_book->button(page, "NormalDrops", 742, 1140, 300, "Normal drops", "$FontColorLightTeal");
+	const std::string word = kind == kPrefixes ? "pre=" + std::to_string(index) : kind == kSuffixes ? "suf=" + std::to_string(index) : "";
+	g_book->label(page, "Note", 82, 1196, 990, 100, v.note.empty() ? "$FontColorGoldYellow" : "$FontColorGreen", "left", 1,
+		(!v.note.empty() ? v.note
+		                 : (word.empty() ? std::string("Automagic rows are the affixes an item base gives itself (items.txt auto prefix).")
+		                                 : "In a recipe: " + word + " (with mag), e.g. cm1,mag," + word + ". The game takes it only if spawnable is 1, frequency above 0, its level reached and the item's type listed.")
+		                       + " The three buttons fill the cells for you; Save changes sends them.")
+			.c_str());
+}
+
+// The Affixes tab before a New: which kind.
+void DrawAffixChoice(modbook::Page* page) {
+	g_book->label(page, "Ask", 82, 320, 990, 120, "$FontColorLightGold", "center", 1,
+		"A new affix is made in an empty row of the game's table (its number never moves, so recipes and saved items keep pointing at it). Which kind?");
+	g_book->button(page, "NewPrefix", 82, 480, 300, "New prefix", "$FontColorGreen");
+	g_book->button(page, "NewSuffix", 412, 480, 300, "New suffix", "$FontColorGreen");
+	g_book->button(page, "NewCancel", 742, 480, 300, "Cancel", "$FontColorWhite");
 }
 
 void __cdecl TabDraw(void* user, modbook::Page* page) noexcept {
 	Guard guard;
-	if (user == &g_funcsView) {
+	if (user == &g_affixView) {
+		if (g_affixView.card >= 0) {
+			DrawAffixCard(page);
+		} else if (g_affixChoosing) {
+			DrawAffixChoice(page);
+		} else {
+			DrawList(page, g_affixView, "Type to search: prefix, scha, made", "(click to open)", true);
+		}
+	} else if (user == &g_funcsView) {
 		DrawList(page, g_funcsView, "Type to search: skill, damage", "(click: puts its number into the func cell you are typing in)", false);
 	} else if (user == &g_statsView) {
 		if (g_statsView.card >= 0) {
@@ -1996,11 +2220,21 @@ void QueueEdit(Command::Kind kind, int row, int cell, const std::string& text) {
 	g_commands.push_back(command);
 }
 
-// What a card's cell holds now. Under the lock.
+std::string UnsavedNote(const ListView& view) {
+	return std::to_string(view.pending.size()) + (view.pending.size() == 1 ? " change is" : " changes are") + " not saved: Save changes, or Discard.";
+}
+
+// What a card's cell holds now (a typed, not saved one first). Under the lock.
 std::string CellNow(const ListView& view) {
 	const Bank* bank = MainBank();
 	if (bank == nullptr || view.card < 0 || view.cell < 0) {
 		return {};
+	}
+	if (const auto typed = view.pending.find(view.cell); typed != view.pending.end()) {
+		return typed->second;
+	}
+	if (&view == &g_affixView) {
+		return bank->affixOn && static_cast<uint64_t>(view.card) < bank->affixes->count && view.cell < affix::kCells ? AffixCells(*bank, static_cast<size_t>(view.card))[static_cast<size_t>(view.cell)] : "";
 	}
 	if (&view == &g_propsView) {
 		return static_cast<uint64_t>(view.card) < bank->propBase && view.cell < kCells ? RowCells(*bank, bank->propRows + static_cast<size_t>(view.card) * prop::kPropRow)[static_cast<size_t>(view.cell)] : "";
@@ -2018,13 +2252,57 @@ std::string CellNow(const ListView& view) {
 void __cdecl TabClick(void* user, const char* what) noexcept {
 	bool  ask = false, close = false;
 	auto* view = static_cast<ListView*>(user);
-	const bool stats = view == &g_statsView, cards = view != &g_funcsView;
+	const bool stats = view == &g_statsView, cards = view != &g_funcsView, affixes = view == &g_affixView;
 	{
 		Guard             guard;
 		const std::string name = what != nullptr ? what : "";
-		if (name == "Escape") {
+		if (affixes && view->card < 0 && g_affixChoosing && (name == "Escape" || name == "NewCancel")) {
+			g_affixChoosing = false;
+		} else if (affixes && view->card < 0 && g_affixChoosing && (name == "NewPrefix" || name == "NewSuffix")) {
+			// the first empty row of that kind (not row 0: pre=0 / suf=0 means none)
+			const Bank* bank = MainBank();
+			const int   kind = name == "NewPrefix" ? kPrefixes : kSuffixes;
+			size_t      row  = 0;
+			bool        found = false;
+			for (size_t index = 1; bank != nullptr && !found && AffixRowOf(*bank, kind, index, row); ++index) {
+				found = affix::IsBlank(bank->affixes->rows + row * affix::kRow, bank->names) && g_affixEdits.count(AffixKey(kind, index)) == 0;
+			}
+			g_affixChoosing = false;
+			if (!found) {
+				view->note = std::string("There is no empty ") + kAffixKinds[kind] + " row left.";
+			} else {
+				int    k = 0;
+				size_t index = 0;
+				AffixPlace(*bank, row, k, index);
+				view->card = static_cast<int>(row);
+				view->cell = -1;
+				view->pending.clear();
+				view->pending[affix::kNameCell]      = "New affix";
+				view->pending[affix::kSpawnCell]     = "1";
+				view->pending[affix::kLevelCell]     = "99";
+				view->pending[affix::kFrequencyCell] = "1";
+				view->note = AffixKey(kind, index) + " was empty and is now yours to fill (Cube only is filled in): give it a name, a mod and the item types (scha for small charms), then Save changes.";
+			}
+		} else if (affixes && view->card >= 0 && (name == "CubeOnly" || name == "RareDrops" || name == "NormalDrops")) {
+			view->cell = -1;
+			view->pending[affix::kSpawnCell] = "1";
+			if (name == "CubeOnly") {
+				view->pending[affix::kFrequencyCell] = "1";
+				view->pending[affix::kLevelCell]     = "99";
+				view->pending[affix::kMaxLevelCell]  = "";
+				view->note = "Cube only: level 99. An item's affix level is at most 99 and drops seldom reach it, so give the recipe lvl 99 (its output's item level). Save changes to keep it.";
+			} else if (name == "RareDrops") {
+				view->pending[affix::kFrequencyCell] = "1";
+				view->note = "Rare drops: frequency 1, the lowest that still lets a recipe force it; it can also drop, seldom. Save changes to keep it.";
+			} else {
+				view->pending[affix::kFrequencyCell] = "4";
+				view->note = "Normal drops: frequency 4, like most of the game's affixes. Save changes to keep it.";
+			}
+		} else if (name == "Escape") {
 			if (cards && view->cell >= 0) {
 				view->cell = -1;
+			} else if (cards && view->card >= 0 && !view->pending.empty()) {
+				view->note = UnsavedNote(*view);
 			} else if (cards && view->card >= 0) {
 				view->card = -1;
 			} else {
@@ -2036,7 +2314,7 @@ void __cdecl TabClick(void* user, const char* what) noexcept {
 				const Entry& entry  = view->entries[view->found[at]];
 				ListView&    props  = g_propsView;
 				const bool   typing = props.card >= 0 && props.cell >= 0;
-				if (view == &g_propsView) {
+				if (view == &g_propsView || affixes) {
 					view->card = entry.row;
 					view->cell = -1;
 					view->note.clear();
@@ -2048,18 +2326,39 @@ void __cdecl TabClick(void* user, const char* what) noexcept {
 					view->note.clear();
 				}
 			}
+		} else if (cards && name == "Back" && !view->pending.empty()) {
+			view->note = UnsavedNote(*view);
 		} else if (cards && name == "Back") {
 			view->card = view->cell = -1;
+		} else if (cards && name == "Save" && view->card >= 0) {
+			if (view->cell >= 0) { // the cell being typed in counts too
+				view->pending[view->cell] = view->cellText;
+				view->cell                = -1;
+			}
+			for (const auto& [cell, text] : view->pending) {
+				QueueEdit(affixes ? Command::AffixEdit : stats ? Command::StatEdit : Command::Edit, view->card, cell, text);
+			}
+			view->note = std::to_string(view->pending.size()) + (view->pending.size() == 1 ? " change" : " changes") + " sent to the game.";
+			view->pending.clear();
+			ask = true;
+		} else if (cards && name == "Discard") {
+			view->pending.clear();
+			view->cell = -1;
+			view->note = "Changes discarded.";
 		} else if (cards && name == "Restore" && view->card >= 0) {
-			QueueEdit(stats ? Command::StatRestore : Command::Restore, view->card, 0, "");
+			view->pending.clear();
+			QueueEdit(affixes ? Command::AffixRestore : stats ? Command::StatRestore : Command::Restore, view->card, 0, "");
 			view->cell = -1;
 			ask        = true;
+		} else if (affixes && name == "New" && view->card < 0) {
+			g_affixChoosing = true;
+			view->note.clear();
 		} else if (stats && name == "New" && view->card < 0) {
 			QueueEdit(Command::StatNew, 0, 0, "");
 			ask = true;
 		} else if (cards && name.rfind("Cell", 0) == 0 && view->card >= 0) {
 			view->cell     = atoi(name.c_str() + 4);
-			view->cell     = view->cell >= 0 && view->cell < (stats ? kStatCells : kCells) ? view->cell : -1;
+			view->cell     = view->cell >= 0 && view->cell < (affixes ? affix::kCells : stats ? kStatCells : kCells) ? view->cell : -1;
 			view->cellText = CellNow(*view);
 		}
 	}
@@ -2067,7 +2366,7 @@ void __cdecl TabClick(void* user, const char* what) noexcept {
 		Ask();
 	}
 	if (close && g_book != nullptr) {
-		g_book->close(view->side);
+		g_book->close(modbook::SideOf(g_book, view->handle, view->side)); // the player may have dragged the tab to the other side
 	}
 	Redraw();
 }
@@ -2090,9 +2389,9 @@ void __cdecl TabKeys(void* user, const char* typed) noexcept {
 					text.pop_back();
 				}
 			} else if (inCard && (c == modbook::kKeyEnter || c == modbook::kKeyTab)) {
-				QueueEdit(stats ? Command::StatEdit : Command::Edit, view->card, view->cell, view->cellText);
-				ask        = true;
-				view->cell = c == modbook::kKeyTab && view->cell + 1 < (stats ? kNameCell : kCells) ? view->cell + 1 : -1;
+				view->pending[view->cell] = view->cellText; // waits for Save changes
+				view->note.clear();
+				view->cell = c == modbook::kKeyTab && view->cell + 1 < (view == &g_affixView ? affix::kCells : stats ? kNameCell : kCells) ? view->cell + 1 : -1;
 				view->cellText = CellNow(*view); // what the next cell holds now
 			} else if (static_cast<unsigned char>(c) >= 0x20 && c != modbook::kKeyDelete && text.size() < 48 && c != '"' && c != '\\') {
 				text += c;
@@ -2126,7 +2425,13 @@ void __cdecl TabMove(void* user, int pages, int rows, int jump) noexcept {
 }
 
 void __cdecl TabShown(void*, int) noexcept {}
-int __cdecl  TabLeave(void*) noexcept {
+int __cdecl  TabLeave(void* user) noexcept {
+	auto* view = static_cast<ListView*>(user);
+	Guard guard;
+	if (view->card >= 0 && !view->pending.empty()) {
+		view->note = UnsavedNote(*view);
+		return 0; // the card stays, saying why
+	}
 	return 1;
 }
 
@@ -2141,16 +2446,18 @@ void BookSetUp() {
 		return;
 	}
 	g_statsView.side = g_funcsView.side = modbook::kRight;
-	g_propsView.side = modbook::kLeft;
+	g_propsView.side = g_affixView.side = modbook::kLeft;
 	const modbook::Tab props { sizeof(modbook::Tab), modbook::kLeft, "properties", "Properties", &g_propsView, TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, nullptr };
 	const modbook::Tab stats { sizeof(modbook::Tab), modbook::kRight, "stats", "Stats", &g_statsView, TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, "Properties" };
 	const modbook::Tab funcs { sizeof(modbook::Tab), modbook::kRight, "funcs", "Funcs", &g_funcsView, TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, "Properties" };
 	g_propsView.handle = book->addTab(&props);
 	g_statsView.handle = book->addTab(&stats);
 	g_funcsView.handle = book->addTab(&funcs);
+	const modbook::Tab affixes { sizeof(modbook::Tab), modbook::kLeft, "affixes", "Affixes", &g_affixView, TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, nullptr };
+	g_affixView.handle = book->addTab(&affixes);
 	g_book             = book;
-	LogF("Mod Book: tabs Properties (left, %s), Stats and Funcs (right, %s, %s)", g_propsView.handle != 0 ? "added" : "REFUSED, see mod-book.log", g_statsView.handle != 0 ? "added" : "REFUSED",
-		g_funcsView.handle != 0 ? "added" : "REFUSED");
+	LogF("Mod Book: tabs Properties and Affixes (left, %s, %s), Stats and Funcs (right, %s, %s)", g_propsView.handle != 0 ? "added" : "REFUSED, see mod-book.log", g_affixView.handle != 0 ? "added" : "REFUSED",
+		g_statsView.handle != 0 ? "added" : "REFUSED", g_funcsView.handle != 0 ? "added" : "REFUSED");
 }
 
 // ---------------------------------------------------------------- threads
@@ -2230,54 +2537,27 @@ void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 
 // ---------------------------------------------------------------- console
 
-constexpr char kUsage[] = "Live Properties: prop | prop book | prop stats | prop funcs | prop set <1-8> <stat A> <stat B> | prop text <1-8> <words> | prop off <1-8> | prop give <1-8> <percent 1-500> [item code]";
+constexpr char kUsage[] = "Live Properties: prop book (Properties) | prop stats | prop funcs | prop affixes - the tabs in the Mod Book (Ctrl+B / Ctrl+L)";
 
 D2RL::ConsoleCommandResult __cdecl OnConsole(D2R::Game::Client*, const D2RL::ConsoleCommandContext* context, void*) noexcept {
 	if (!g_enabled || !g_link.ok || g_threads == nullptr) {
 		g_ctx->WriteConsoleMessage(!g_enabled ? "Live Properties: off in the settings (enabled = false)." : ("Live Properties: off - " + g_linkProblem + ".").c_str());
 		return D2RL::ConsoleCommandResult::Handled;
 	}
-	char word[16] = "", a[64] = "", b[64] = "", c[64] = "";
+	char              word[16] = "";
 	const std::string args(context != nullptr && context->args != nullptr ? context->args : "", context != nullptr && context->args != nullptr ? context->argsLength : 0);
-	const int         got = sscanf(args.c_str(), " %15s %63s %63s %63s", word, a, b, c);
-	Command           command;
-	const int         slot = atoi(a);
-	if (got == 1 && (strcmp(word, "book") == 0 || strcmp(word, "stats") == 0 || strcmp(word, "funcs") == 0)) {
+	const int         got = sscanf(args.c_str(), " %15s", word);
+	const std::string w   = got == 1 ? word : "";
+	if (w == "book" || w == "stats" || w == "funcs" || w == "affixes") {
 		BookSetUp();
 		if (g_book == nullptr) {
 			g_ctx->WriteConsoleMessage("Live Properties: the Mod Book plugin (d2rl-mod-book.dll) is not installed; there are no panels without it.");
 		} else {
-			g_book->toggle(word[0] == 'b' ? g_propsView.handle : word[0] == 'f' ? g_funcsView.handle : g_statsView.handle);
+			g_book->toggle(w == "book" ? g_propsView.handle : w == "funcs" ? g_funcsView.handle : w == "affixes" ? g_affixView.handle : g_statsView.handle);
 		}
 		return D2RL::ConsoleCommandResult::Handled;
 	}
-	if (got <= 0 || strcmp(word, "list") == 0) {
-		command.kind = Command::List;
-	} else if (strcmp(word, "set") == 0 && got == 4 && slot >= 1 && slot <= kSlots) {
-		command = { Command::Set, slot, 0, b, c };
-	} else if (strcmp(word, "text") == 0 && got >= 3 && slot >= 1 && slot <= kSlots) {
-		const size_t at = args.find(a, args.find("text") + 4) + strlen(a);
-		std::string  line = args.substr(args.find_first_not_of(" \t", at));
-		for (char& letter : line) {
-			letter = letter == '\t' || letter == '"' || letter == '\\' ? ' ' : letter;
-		}
-		command = { Command::Text, slot, 0, line };
-	} else if (strcmp(word, "off") == 0 && got == 2 && slot >= 1 && slot <= kSlots) {
-		command = { Command::Off, slot };
-	} else if (strcmp(word, "give") == 0 && got >= 3 && slot >= 1 && slot <= kSlots && atoi(b) >= 1 && atoi(b) <= prop::kMaxPct) {
-		command = { Command::Give, slot, atoi(b), got == 4 ? c : "cm1" };
-	} else {
-		g_ctx->WriteConsoleMessage(kUsage);
-		return D2RL::ConsoleCommandResult::Handled;
-	}
-	if (g_inventory != nullptr) {
-		static_cast<void>(g_inventory->getLocalPlayer(g_ctx, &command.player));
-	}
-	{
-		Guard guard;
-		g_commands.push_back(command);
-	}
-	Ask();
+	g_ctx->WriteConsoleMessage(kUsage);
 	return D2RL::ConsoleCommandResult::Handled;
 }
 

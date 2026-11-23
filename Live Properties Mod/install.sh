@@ -23,4 +23,4 @@ fi
 cp build/d2rl-live-properties.dll "$DEST/d2rl-live-properties.dll.installing"
 mv "$DEST/d2rl-live-properties.dll.installing" "$DEST/d2rl-live-properties.dll"
 ls -la "$DEST/d2rl-live-properties.dll"
-echo "installed. Start the game, enter a game, open the console and type: prop"
+echo "installed. Start the game, enter a game, open the Mod Book (Ctrl+B) or type prop in the console"

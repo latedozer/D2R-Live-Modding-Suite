@@ -36,7 +36,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.5.1";
+constexpr const char* kVersion = "0.7.0";
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -202,6 +202,7 @@ constexpr int kButtonWidths[] = { 116, 188, 200, 216, 220, 232, 250, 300, 330, 4
 bool          g_buttonArt     = false;
 bool          g_barArt        = false;
 constexpr int kTrackHeight = 840, kMarkHeight = 70;
+constexpr int kPanelWidth  = 1160; // the frame's width in page pixels
 
 bool HasButtonArt(int width) {
 	return g_buttonArt && std::find(std::begin(kButtonWidths), std::end(kButtonWidths), width) != std::end(kButtonWidths);
@@ -325,6 +326,16 @@ struct Slot {
 struct TabEntry {
 	modbook::Tab tab {};
 	std::string  id, title, group;
+	std::string  home; // the group its plugin gave it: it gets that back on a side with groups
+};
+
+// A tab's or a group's button on a page: where it is, what it holds.
+struct Hit {
+	bool        group  = false; // a group's button (else a tab's)
+	int         handle = 0;     // the tab's handle (a tab's button)
+	std::string name;           // the group's name (a group's button) or the tab's group
+	std::string click;          // "Tab3", "Group1"
+	float       x = 0, y = 0, w = 0, h = 0;
 };
 
 struct Side {
@@ -359,11 +370,17 @@ struct Side {
 	bool     hasBar = false;
 	int      barY   = 0; // the bar's top on the page
 	uint64_t barTop = 0, barShown = 0, barCount = 0;
-	// where the panel is in the game window, learnt from clicks on the bar (Calibrate)
-	bool  calOk = false;
+	// the tab and group buttons of the page shown (UI thread): a click on one also tells where
+	// the panel is (Calibrate), and a tab's button can be dragged (MoveTab)
+	std::vector<Hit> hits;
+	// where the panel is in the game window, learnt from clicks on the bar and the tab buttons (Calibrate)
+	bool  calOk = false, guessed = false; // guessed: from the window's size only (Guess), until a click says better
 	float scale = 0, originXLo = 0, originXHi = 0, originYLo = 0, originYHi = 0;
-	int   firstSeg = -1, firstBarY = 0;
+	int   firstPageY = -1;
 	float firstY = 0;
+	// the tab buttons for the mouse hook's thread, under g_typeLock; places in the window's own pixels
+	std::vector<Hit> winHits;
+	float            panelX0 = 0, panelX1 = 0;
 	// the same for the mouse hook's thread, under g_typeLock; places in the window's own pixels
 	bool     trackOk = false;
 	float    trackX = 0, trackY = 0, trackW = 0, trackH = 0, trackRange = 0, markH = 0;
@@ -573,11 +590,19 @@ void __cdecl ApiBar(Page* p, int y, uint64_t top, uint64_t shown, uint64_t count
 		return;
 	}
 	p->bar = true, p->barY = p->y(y), p->barTop = top, p->barShown = shown, p->barCount = count;
-	// unseen pieces over the bar: a click on one goes there, and tells where the bar is on screen (Calibrate)
-	for (int seg = 0; seg * kBarPiece < kTrackHeight - p->down; ++seg) {
-		const std::string n = std::to_string(seg);
-		RawSpot(*p, "BarSpot" + n, kBarSpotX, p->y(y) + seg * kBarPiece, kBarSpotWidth, kBarPiece, "Bar" + n, "");
-	}
+	// Unseen pieces over the bar: a click on one goes there, and tells where the bar is on screen
+	// (Calibrate). They come LAST, so they lie on top of the track and the marks: written first,
+	// a click on the mark (where people grab a bar) hit the picture and the game reported nothing.
+	struct Pieces {
+		Page* p;
+		int   y;
+		~Pieces() {
+			for (int seg = 0; seg * kBarPiece < kTrackHeight - p->down; ++seg) {
+				const std::string n = std::to_string(seg);
+				RawSpot(*p, "BarSpot" + n, kBarSpotX, p->y(y) + seg * kBarPiece, kBarSpotWidth, kBarPiece, "Bar" + n, "");
+			}
+		}
+	} pieces { p, y };
 	char text[500];
 	snprintf(text, sizeof(text), "\t\t{ \"type\": \"ImageWidget\", \"name\": \"ScrollTrack\", \"fields\": { \"rect\": { \"x\": 1070, \"y\": %d }, \"filename\": \"d2rloader\\\\mod-book\\\\scrolltrack\" } },\n", p->y(y));
 	Put(*p, text);
@@ -618,8 +643,34 @@ void __cdecl ApiTitle(Page* p, const char* text) noexcept {
 	}
 }
 
+// Before any click: where the panel should be, from the game window's size alone. Measured on a
+// 16:9 window (1920 x 1080 and 1920 x 1101): the left panel's corner at 0.111 x 0.097 of the
+// window's height, the right one's 0.651 heights in from the right edge; a page pixel is
+// height / 2160. The first click on a tab or the bar takes its place (Calibrate).
+void Guess(Side& s) {
+	RECT       client {};
+	const HWND window  = GetForegroundWindow();
+	DWORD      process = 0;
+	if (window == nullptr || GetWindowThreadProcessId(window, &process) == 0 || process != GetCurrentProcessId() || !GetClientRect(window, &client) || client.bottom <= 0) {
+		return;
+	}
+	const float height = static_cast<float>(client.bottom), width = static_cast<float>(client.right);
+	if (width < height * 1.3f || width > height * 1.9f) {
+		return; // not near 16:9: no measurement to go by
+	}
+	const float x = s.right ? width - 0.651f * height : 0.111f * height, y = 0.097f * height, slack = 0.01f * height;
+	s.scale = height / 2160.0f;
+	s.originXLo = x - slack, s.originXHi = x + slack, s.originYLo = y - slack, s.originYHi = y + slack;
+	s.calOk = s.guessed = true;
+	LogF("%s: before any click, the panel is taken to be at about %.0f, %.0f of a %.0f x %.0f window (a page pixel %.3f window pixels); a click on a tab or the scroll bar puts that right",
+		s.id, x, y, width, height, s.scale);
+}
+
 // The bar's place in the game window, for the mouse hook's thread. UI thread.
 void UpdateTrack(Side& s) {
+	if (!s.calOk) {
+		Guess(s);
+	}
 	AcquireSRWLockExclusive(&g_typeLock);
 	s.trackOk = s.calOk && s.hasBar && s.barCount > s.barShown;
 	if (s.trackOk) {
@@ -630,6 +681,16 @@ void UpdateTrack(Side& s) {
 		s.trackRange = s.scale * static_cast<float>(kTrackHeight - kMarkHeight - s.down);
 		s.trackH     = s.trackRange + s.markH;
 		s.dragShown = s.barShown, s.dragCount = s.barCount, s.dragTop = s.barTop;
+	}
+	s.winHits.clear();
+	if (s.calOk) {
+		const float x0 = (s.originXLo + s.originXHi) / 2, y0 = (s.originYLo + s.originYHi) / 2;
+		for (const Hit& hit : s.hits) {
+			Hit on = hit;
+			on.x = x0 + s.scale * hit.x, on.y = y0 + s.scale * hit.y, on.w = s.scale * hit.w, on.h = s.scale * hit.h;
+			s.winHits.push_back(std::move(on));
+		}
+		s.panelX0 = x0, s.panelX1 = x0 + s.scale * kPanelWidth;
 	}
 	ReleaseSRWLockExclusive(&g_typeLock);
 }
@@ -681,6 +742,7 @@ Page SidePage(Side& s) {
 	}
 	s.down = groups.empty() ? (tabs.size() > 1 ? modbook::kStripHeight : 0) : modbook::kStripHeight * (members.size() > 1 ? 2 : 1);
 	Page      page { {}, &s, s.down };
+	std::vector<Hit> hits;
 	TabEntry* tab = !tabs.empty() ? TabOf(tabs[shown] + 1) : nullptr;
 	PageStart(page, tab != nullptr ? tab->title : std::string("Mod Book"));
 	const auto row = [&](size_t n, int y, const auto& button) { // 1 or 2 buttons 480 wide, 3 at 300, 4 at 232, 5 at 188
@@ -693,11 +755,19 @@ Page SidePage(Side& s) {
 	if (!groups.empty()) {
 		row(groups.size(), 262, [&](size_t i, int x, int y, int width) {
 			RawButton(page, "Group" + std::to_string(i), x, y, width, groups[i], static_cast<int>(i) == groupOf[shown] ? "$FontColorWhite" : "$FontColorGoldYellow");
+			int only = 0, count = 0; // a group of one tab shows no tab button: its group's button drags it
+			for (size_t t = 0; t < tabs.size(); ++t) {
+				if (groupOf[t] == static_cast<int>(i)) {
+					only = tabs[t] + 1, ++count;
+				}
+			}
+			hits.push_back({ true, count == 1 ? only : 0, groups[i], "Group" + std::to_string(i), static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), 44 });
 		});
 		if (members.size() > 1) {
 			row(members.size(), 262 + modbook::kStripHeight, [&](size_t i, int x, int y, int width) {
 				const TabEntry* entry = TabOf(tabs[members[i]] + 1);
 				RawButton(page, "Tab" + std::to_string(members[i]), x, y, width, entry != nullptr ? entry->title : "?", members[i] == shown ? "$FontColorWhite" : "$FontColorGoldYellow");
+				hits.push_back({ false, tabs[members[i]] + 1, groups[static_cast<size_t>(groupOf[members[i]])], "Tab" + std::to_string(members[i]), static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), 44 });
 			});
 		}
 	} else if (tabs.size() > 1) {
@@ -709,6 +779,7 @@ Page SidePage(Side& s) {
 			const TabEntry* entry = TabOf(tabs[i] + 1);
 			RawButton(page, "Tab" + std::to_string(i), 82 + static_cast<int>(i) * step, 262, width, entry != nullptr ? entry->title : "?",
 				static_cast<int>(i) == s.current ? "$FontColorWhite" : "$FontColorGoldYellow");
+			hits.push_back({ false, tabs[i] + 1, std::string(), "Tab" + std::to_string(i), static_cast<float>(82 + static_cast<int>(i) * step), 262, static_cast<float>(width), 44 });
 		}
 	}
 	if (tab == nullptr) {
@@ -717,6 +788,7 @@ Page SidePage(Side& s) {
 		tab->tab.draw(tab->tab.user, &page);
 	}
 	s.hasBar = page.bar, s.barY = page.barY, s.barTop = page.barTop, s.barShown = page.barShown, s.barCount = page.barCount;
+	s.hits   = std::move(hits);
 	UpdateTrack(s);
 	PageDone(page);
 	return page;
@@ -1070,6 +1142,16 @@ bool AnyOpen() {
 	return g_left.open.load() || g_right.open.load();
 }
 
+// A tab's button dragged and let go somewhere (the mouse hook's thread asks, the UI thread moves it).
+struct TabMove {
+	int         handle = 0;      // the tab dragged
+	int         to     = 0;      // the side it goes to (modbook::kLeft / kRight)
+	int         onTab  = 0;      // let go on this tab's button: it takes that place and group
+	bool        onGroup = false; // let go on a group's button: it joins that group, at its end
+	std::string group;
+};
+std::vector<TabMove> g_moves; // under g_typeLock
+
 std::atomic<bool>     g_dragging { false }; // a scroll bar is held (the mouse hook's thread says so)
 std::atomic<uint64_t> g_dragEndAt { 0 };    // when it was let go
 std::atomic<long> g_upX { 0 }, g_upY { 0 }; // where the left button last came up (screen), from the mouse hook
@@ -1079,7 +1161,9 @@ std::atomic<uint64_t> g_upAt { 0 };
 // the game just told us which piece, and the mouse hook saw where the button came up. That
 // gives the panel's place in the window to within a piece; more clicks narrow it down, and two
 // clicks far apart also check the scale (the layouts are written for a 2160-line screen).
-void Calibrate(Side& s, int seg) {
+// Any button whose place on the page is known does the same (the tab buttons). x, y, w, h: the
+// clicked thing's place on the page (moved down already); what: its name for the log.
+void Calibrate(Side& s, float x, float y, float w, float h, const char* what) {
 	POINT      up { g_upX.load(), g_upY.load() };
 	RECT       client {};
 	const HWND window  = GetForegroundWindow();
@@ -1088,20 +1172,24 @@ void Calibrate(Side& s, int seg) {
 		|| !GetClientRect(window, &client) || client.bottom <= 0) {
 		return;
 	}
+	if (s.guessed) { // a real click: the guess goes
+		s.guessed = false, s.calOk = false, s.scale = 0;
+	}
 	float scale = s.scale > 0 ? s.scale : static_cast<float>(client.bottom) / 2160.0f;
-	if (s.firstSeg >= 0 && s.firstBarY == s.barY && (seg - s.firstSeg >= 6 || s.firstSeg - seg >= 6)) {
-		const float measured = (static_cast<float>(up.y) - s.firstY) / static_cast<float>((seg - s.firstSeg) * kBarPiece);
+	const int pageY = static_cast<int>(y + h / 2);
+	if (s.firstPageY >= 0 && (pageY - s.firstPageY >= 6 * kBarPiece || s.firstPageY - pageY >= 6 * kBarPiece)) {
+		const float measured = (static_cast<float>(up.y) - s.firstY) / static_cast<float>(pageY - s.firstPageY);
 		if (measured > 0.15f && measured < 4.0f && (measured > scale * 1.08f || measured < scale * 0.92f)) {
 			LogF("%s: scroll bar: two clicks say a page pixel is %.3f window pixels, not %.3f; taken", s.id, measured, scale);
 			scale   = measured;
 			s.calOk = false;
 		}
 	}
-	if (s.firstSeg < 0 || s.firstBarY != s.barY) {
-		s.firstSeg = seg, s.firstBarY = s.barY, s.firstY = static_cast<float>(up.y);
+	if (s.firstPageY < 0) {
+		s.firstPageY = pageY, s.firstY = static_cast<float>(up.y);
 	}
-	const float yLo = static_cast<float>(up.y) - scale * static_cast<float>(s.barY + (seg + 1) * kBarPiece), yHi = static_cast<float>(up.y) - scale * static_cast<float>(s.barY + seg * kBarPiece);
-	const float xLo = static_cast<float>(up.x) - scale * (kBarSpotX + kBarSpotWidth), xHi = static_cast<float>(up.x) - scale * kBarSpotX;
+	const float yLo = static_cast<float>(up.y) - scale * (y + h), yHi = static_cast<float>(up.y) - scale * y;
+	const float xLo = static_cast<float>(up.x) - scale * (x + w), xHi = static_cast<float>(up.x) - scale * x;
 	const bool  was = s.calOk;
 	if (s.calOk && yLo <= s.originYHi && yHi >= s.originYLo && xLo <= s.originXHi && xHi >= s.originXLo) { // agrees with what was known: narrower
 		s.originYLo = yLo > s.originYLo ? yLo : s.originYLo, s.originYHi = yHi < s.originYHi ? yHi : s.originYHi;
@@ -1112,7 +1200,7 @@ void Calibrate(Side& s, int seg) {
 	s.scale = scale;
 	s.calOk = true;
 	if (!was) {
-		LogF("%s: scroll bar: a click on piece %d came up at %ld, %ld of a %ld x %ld window; a page pixel is taken as %.3f window pixels, the panel's corner at about %.0f, %.0f. The bar can be dragged now.", s.id, seg,
+		LogF("%s: a click on %s came up at %ld, %ld of a %ld x %ld window; a page pixel is taken as %.3f window pixels, the panel's corner at about %.0f, %.0f. The scroll bar and the tab buttons can be dragged now.", s.id, what,
 			up.x, up.y, client.right, client.bottom, scale, (s.originXLo + s.originXHi) / 2, (s.originYLo + s.originYHi) / 2);
 	}
 	UpdateTrack(s);
@@ -1164,10 +1252,193 @@ void SideToggle(Side& s, int how) { // 1 open, 2 close without asking, 3 toggle
 	}
 }
 
+// ---------------------------------------------------------------- the player's order of the tabs
+//
+// d2rloader\live-suite\mod-book\tab-order.txt: one line a tab, "Left|Right <tab> id <tab> group (- none)",
+// in order. Written when a tab is dragged; read at start; a tab in it goes where it says,
+// whatever side its plugin asked for. A tab not in it goes where its plugin asked.
+
+struct Saved {
+	std::string id, group;
+	bool        right = false;
+};
+std::vector<Saved> g_order; // under g_tabLock
+
+// d2rloader\live-suite\mod-book\tab-order.txt (the Live Suite keeps its files under
+// live-suite); a file in the old place, d2rloader\mod-book, is moved there once.
+std::wstring OrderPath() {
+	const std::wstring loader = GameDirectory() + L"\\d2rloader", now = loader + L"\\live-suite\\mod-book\\tab-order.txt", old = loader + L"\\mod-book\\tab-order.txt";
+	if (GetFileAttributesW(now.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(old.c_str()) != INVALID_FILE_ATTRIBUTES) {
+		CreateDirectoryW((loader + L"\\live-suite").c_str(), nullptr);
+		CreateDirectoryW((loader + L"\\live-suite\\mod-book").c_str(), nullptr);
+		if (MoveFileExW(old.c_str(), now.c_str(), 0)) {
+			RemoveDirectoryW((loader + L"\\mod-book").c_str()); // only goes when empty
+			LogF("tab-order.txt moved from d2rloader\\mod-book to d2rloader\\live-suite\\mod-book");
+		}
+	}
+	return now;
+}
+
+void LoadOrder() {
+	std::string text;
+	if (!ReadWhole(OrderPath(), text)) {
+		return;
+	}
+	size_t start = 0;
+	while (start < text.size()) {
+		size_t end = text.find('\n', start);
+		end        = end == std::string::npos ? text.size() : end;
+		std::string line = text.substr(start, end - start);
+		start            = end + 1;
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+		if (line.empty() || line[0] == '#' || b == std::string::npos) {
+			continue;
+		}
+		Saved saved { line.substr(a + 1, b - a - 1), line.substr(b + 1), line.substr(0, a) == "Right" };
+		saved.group = saved.group == "-" ? std::string() : saved.group;
+		g_order.push_back(std::move(saved));
+	}
+	LogF("tab-order.txt: %zu tabs placed as you left them (delete the file, or console: modbook tabs reset, for the plugins' own places)", g_order.size());
+}
+
+const Saved* SavedOf(const std::string& id, size_t* rank = nullptr) { // under g_tabLock
+	for (size_t i = 0; i < g_order.size(); ++i) {
+		if (g_order[i].id == id) {
+			if (rank != nullptr) {
+				*rank = i;
+			}
+			return &g_order[i];
+		}
+	}
+	return nullptr;
+}
+
+// The order as it is now; lines of tabs whose plugin is not here this time are kept. Under g_tabLock (exclusive).
+void SaveOrder() {
+	std::vector<Saved> now;
+	for (Side* side : g_sides) {
+		for (const int index : side->tabs) {
+			now.push_back({ g_tabs[static_cast<size_t>(index)]->id, g_tabs[static_cast<size_t>(index)]->group, side->right });
+		}
+	}
+	for (const Saved& old : g_order) {
+		bool here = false;
+		for (const Saved& n : now) {
+			here = here || n.id == old.id;
+		}
+		if (!here) {
+			now.push_back(old);
+		}
+	}
+	g_order = now;
+	std::string text = "# Mod Book: the tabs in the order you dragged them. Side, tab, group (- none). Delete this file for the plugins' own places.\r\n";
+	for (const Saved& saved : g_order) {
+		text += std::string(saved.right ? "Right" : "Left") + "\t" + saved.id + "\t" + (saved.group.empty() ? "-" : saved.group) + "\r\n";
+	}
+	const std::wstring path = OrderPath();
+	CreateDirectoryW((GameDirectory() + L"\\d2rloader").c_str(), nullptr);
+	CreateDirectoryW((GameDirectory() + L"\\d2rloader\\live-suite").c_str(), nullptr);
+	CreateDirectoryW(path.substr(0, path.find_last_of(L'\\')).c_str(), nullptr);
+	const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	DWORD        wrote = 0;
+	if (file == INVALID_HANDLE_VALUE || !WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &wrote, nullptr) || wrote != text.size()) {
+		LogF("tab-order.txt could not be written (error %lu): the order holds until the game is closed", GetLastError());
+	}
+	if (file != INVALID_HANDLE_VALUE) {
+		CloseHandle(file);
+	}
+}
+
+int HandleShown(Side& s) {
+	const std::vector<int> tabs = TabsOf(s);
+	return static_cast<size_t>(s.current) < tabs.size() ? tabs[static_cast<size_t>(s.current)] + 1 : 0;
+}
+
+int IndexOf(Side& s, int handle) {
+	const std::vector<int> tabs = TabsOf(s);
+	for (size_t i = 0; i < tabs.size(); ++i) {
+		if (tabs[i] + 1 == handle) {
+			return static_cast<int>(i);
+		}
+	}
+	return -1;
+}
+
+// A dragged tab goes to its new place: the side it was let go on, before or after the tab let
+// go on (that tab's group too), at the end of a group, or at the end of the other side. It is
+// then the tab shown there. UI thread.
+void MoveTab(const TabMove& m) {
+	TabEntry* entry = TabOf(m.handle);
+	Side*     from  = nullptr;
+	for (Side* side : g_sides) {
+		from = IndexOf(*side, m.handle) >= 0 ? side : from;
+	}
+	Side& to = *g_sides[m.to];
+	if (entry == nullptr || from == nullptr || m.onTab == m.handle) {
+		return;
+	}
+	if (from != &to && TabsOf(to).size() >= static_cast<size_t>(kTabsMost)) {
+		LogF("tab '%s' stays: the %s side has %d tabs already", entry->id.c_str(), to.id, kTabsMost);
+		return;
+	}
+	const int fromShown = HandleShown(*from), toShown = HandleShown(to);
+	const int fromAt    = IndexOf(*from, m.handle);
+	Tell(*from, false);
+	Tell(to, false);
+	AcquireSRWLockExclusive(&g_tabLock);
+	from->tabs.erase(from->tabs.begin() + fromAt);
+	bool anyGroup = false;
+	for (const int index : to.tabs) {
+		anyGroup = anyGroup || !g_tabs[static_cast<size_t>(index)]->group.empty();
+	}
+	size_t at = to.tabs.size();
+	if (m.onTab != 0) {
+		for (size_t i = 0; i < to.tabs.size(); ++i) {
+			if (to.tabs[i] + 1 == m.onTab) {
+				at = from == &to && static_cast<size_t>(fromAt) <= i ? i + 1 : i; // dragged forward: after it; back: before it
+			}
+		}
+		entry->group = g_tabs[static_cast<size_t>(m.onTab - 1)]->group;
+	} else if (m.onGroup) {
+		for (size_t i = 0; i < to.tabs.size(); ++i) {
+			if (g_tabs[static_cast<size_t>(to.tabs[i])]->group == m.group || (m.group == "Other" && g_tabs[static_cast<size_t>(to.tabs[i])]->group.empty())) {
+				at = i + 1;
+			}
+		}
+		entry->group = m.group == "Other" ? std::string() : m.group;
+	} else {
+		entry->group = anyGroup ? entry->home : std::string(); // let go on the panel: its own group where there are groups, none where there are none
+	}
+	to.tabs.insert(to.tabs.begin() + static_cast<long>(at), m.handle - 1);
+	entry->tab.side = m.to;
+	SaveOrder();
+	ReleaseSRWLockExclusive(&g_tabLock);
+	const int fromNow = IndexOf(*from, fromShown);
+	from->current     = fromNow >= 0 ? fromNow : 0;
+	to.current        = IndexOf(to, m.handle);
+	static_cast<void>(toShown);
+	LogF("tab '%s' dragged to the %s side, place %zu%s%s", entry->id.c_str(), to.id, at + 1, entry->group.empty() ? "" : ", group ", entry->group.c_str());
+	from->dirty.store(true);
+	to.dirty.store(true);
+	if (from != &to && from->open.load() && !to.open.load()) {
+		to.wantOpen.store(1); // it is shown where it went
+	}
+}
+
 // Everything asked for since the last time, on the UI thread: clicks, keys, the wheel, a tab
 // wanting to be drawn again, the hook thread's look four times a second.
 void __cdecl Job(const D2RL::PluginContext*, void*) noexcept {
 	bool again = false;
+	AcquireSRWLockExclusive(&g_typeLock);
+	const std::vector<TabMove> moves = std::move(g_moves);
+	g_moves.clear();
+	ReleaseSRWLockExclusive(&g_typeLock);
+	for (const TabMove& move : moves) {
+		MoveTab(move);
+	}
 	for (Side* side : g_sides) {
 		Side& s = *side;
 		AcquireSRWLockExclusive(&g_typeLock);
@@ -1225,6 +1496,12 @@ void __cdecl Job(const D2RL::PluginContext*, void*) noexcept {
 			if (click == "Previous" || click == "Next") {
 				move += click == "Next" ? 1 : -1;
 			} else if ((click.rfind("Tab", 0) == 0 && click.size() == 4 && click[3] >= '0' && click[3] <= '9') || (click.rfind("Group", 0) == 0 && click.size() == 6 && click[5] >= '0' && click[5] <= '9')) {
+				for (const Hit& hit : s.hits) {
+					if (hit.click == click) {
+						Calibrate(s, hit.x, hit.y, hit.w, hit.h, ("the button " + click).c_str());
+						break;
+					}
+				}
 				int to = click[3] - '0';
 				if (click[0] == 'G') { // a group: its first tab (the one shown stays when it is of that group)
 					std::vector<int>       groupOf;
@@ -1247,7 +1524,7 @@ void __cdecl Job(const D2RL::PluginContext*, void*) noexcept {
 				s.dirty.store(true);
 			} else if (click.rfind("Bar", 0) == 0 && click.size() >= 4 && click[3] >= '0' && click[3] <= '9') {
 				const int seg = atoi(click.c_str() + 3);
-				Calibrate(s, seg);
+				Calibrate(s, kBarSpotX, static_cast<float>(s.barY + seg * kBarPiece), kBarSpotWidth, kBarPiece, ("the scroll bar's piece " + std::to_string(seg)).c_str());
 				if (s.hasBar && s.barCount > s.barShown && kTrackHeight - kMarkHeight - s.down > 0) { // the mark's middle goes to the piece's middle
 					float part = static_cast<float>(seg * kBarPiece + kBarPiece / 2 - kMarkHeight / 2) / static_cast<float>(kTrackHeight - kMarkHeight - s.down);
 					part       = part < 0 ? 0 : part > 1 ? 1 : part;
@@ -1526,8 +1803,79 @@ bool DragBar(Side* held, POINT at) {
 	return false;
 }
 
+// A tab's button pressed (hook thread only). The press is not taken from the game: let go on the
+// same button it is a click as ever; let go elsewhere the game does nothing and the tab is moved.
+Side* g_pressSide   = nullptr;
+int   g_pressHandle = 0;
+POINT g_pressAt {};
+
+POINT InWindow(POINT at) {
+	if (const HWND window = GetForegroundWindow(); window != nullptr) {
+		ScreenToClient(window, &at);
+	}
+	return at;
+}
+
+const Hit* HitAt(const Side& side, POINT at) { // under g_typeLock
+	for (const Hit& hit : side.winHits) {
+		if (static_cast<float>(at.x) >= hit.x && static_cast<float>(at.x) < hit.x + hit.w && static_cast<float>(at.y) >= hit.y && static_cast<float>(at.y) < hit.y + hit.h) {
+			return &hit;
+		}
+	}
+	return nullptr;
+}
+
+void TabPressed(POINT screen) {
+	const POINT at = InWindow(screen);
+	g_pressSide    = nullptr;
+	AcquireSRWLockExclusive(&g_typeLock);
+	for (Side* side : g_sides) {
+		if (const Hit* hit = side->open.load() ? HitAt(*side, at) : nullptr; hit != nullptr && hit->handle != 0) { // a tab's button, or the button of a group of one tab
+			g_pressSide = side, g_pressHandle = hit->handle, g_pressAt = at;
+			break;
+		}
+	}
+	ReleaseSRWLockExclusive(&g_typeLock);
+}
+
+void TabLetGo(POINT screen) {
+	Side* from  = g_pressSide;
+	g_pressSide = nullptr;
+	const POINT at = InWindow(screen);
+	const long  dx = at.x - g_pressAt.x, dy = at.y - g_pressAt.y;
+	if (from == nullptr || dx * dx + dy * dy < 20 * 20) {
+		return; // not moved: a click
+	}
+	TabMove move;
+	move.handle = g_pressHandle;
+	bool where  = false;
+	AcquireSRWLockExclusive(&g_typeLock);
+	for (Side* side : g_sides) {
+		if (const Hit* hit = side->open.load() ? HitAt(*side, at) : nullptr; hit != nullptr) {
+			move.to = side->right ? modbook::kRight : modbook::kLeft, move.onTab = hit->group ? 0 : hit->handle, move.onGroup = hit->group, move.group = hit->name;
+			where   = hit->handle != g_pressHandle;
+			break;
+		}
+	}
+	// let go outside its panel, toward the other side: the end of the other side
+	if (!where && (from->right ? static_cast<float>(at.x) < from->panelX0 : static_cast<float>(at.x) > from->panelX1)) {
+		move.to = from->right ? modbook::kLeft : modbook::kRight;
+		where   = true;
+	}
+	if (where) {
+		g_moves.push_back(move);
+	}
+	ReleaseSRWLockExclusive(&g_typeLock);
+	if (where) {
+		AskJob();
+	}
+}
+
 LRESULT CALLBACK MouseProc(int code, WPARAM message, LPARAM parameter) {
 	const auto* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(parameter);
+	if (code >= 0 && mouse != nullptr && message == WM_LBUTTONUP && g_pressSide != nullptr) {
+		TabLetGo(mouse->pt);
+	}
 	if (code >= 0 && mouse != nullptr && message == WM_LBUTTONUP) {
 		g_upX.store(mouse->pt.x), g_upY.store(mouse->pt.y);
 		g_upAt.store(NowMs());
@@ -1549,6 +1897,9 @@ LRESULT CALLBACK MouseProc(int code, WPARAM message, LPARAM parameter) {
 	}
 	if (code >= 0 && mouse != nullptr && message == WM_LBUTTONDOWN && AnyOpen() && GameIsInFront() && DragBar(nullptr, mouse->pt)) {
 		return 1;
+	}
+	if (code >= 0 && mouse != nullptr && message == WM_LBUTTONDOWN && AnyOpen() && GameIsInFront()) {
+		TabPressed(mouse->pt);
 	}
 	if (code >= 0 && mouse != nullptr && message == WM_MOUSEWHEEL && AnyOpen() && GameIsInFront()) {
 		Wheel(static_cast<short>(HIWORD(mouse->mouseData)));
@@ -1610,10 +1961,10 @@ int __cdecl ApiAddTab(const modbook::Tab* tab) noexcept {
 		LogF("a tab was refused: it is not filled in (size, side, id, title and draw are needed)");
 		return 0;
 	}
-	Side& side  = *g_sides[tab->side];
 	auto* entry = new TabEntry; // never freed: the UI thread may be drawing it
 	memcpy(&entry->tab, tab, tab->size < sizeof(modbook::Tab) ? tab->size : sizeof(modbook::Tab)); // a tab from before groups has none
 	entry->group     = tab->size >= sizeof(modbook::Tab) && tab->group != nullptr ? tab->group : "";
+	entry->home      = entry->group;
 	entry->tab.group = nullptr;
 	entry->tab.size  = sizeof(modbook::Tab);
 	entry->id        = tab->id;
@@ -1621,6 +1972,13 @@ int __cdecl ApiAddTab(const modbook::Tab* tab) noexcept {
 	entry->tab.id    = entry->id.c_str();
 	entry->tab.title = entry->title.c_str();
 	AcquireSRWLockExclusive(&g_tabLock);
+	size_t       rank  = 0;
+	const Saved* saved = SavedOf(entry->id, &rank);
+	Side&        side  = *g_sides[saved != nullptr ? (saved->right ? modbook::kRight : modbook::kLeft) : tab->side];
+	if (saved != nullptr) {
+		entry->group = saved->group;
+	}
+	entry->tab.side = side.right ? modbook::kRight : modbook::kLeft;
 	int handle = 0;
 	for (const int index : side.tabs) {
 		if (g_tabs[static_cast<size_t>(index)]->id == entry->id) { // the same tab again (its plugin set itself up again): the new callbacks take its place
@@ -1633,8 +1991,21 @@ int __cdecl ApiAddTab(const modbook::Tab* tab) noexcept {
 	const bool room = handle != 0 || side.tabs.size() < static_cast<size_t>(kTabsMost);
 	if (handle == 0 && room) {
 		g_tabs.push_back(entry);
-		// the Mod Book's own Terms tab stays the last one of its side
-		if (!side.tabs.empty() && g_tabs[static_cast<size_t>(side.tabs.back())]->id == "terms" && entry->id != "terms") {
+		size_t before = side.tabs.size(); // as the player left it: before the first tab that was after it
+		for (size_t i = 0; saved != nullptr && i < side.tabs.size(); ++i) {
+			size_t other = 0;
+			if (SavedOf(g_tabs[static_cast<size_t>(side.tabs[i])]->id, &other) != nullptr && other > rank) {
+				before = i;
+				break;
+			}
+		}
+		if (saved != nullptr) {
+			if (side.current >= static_cast<int>(before) && !side.tabs.empty()) {
+				++side.current;
+			}
+			side.tabs.insert(side.tabs.begin() + static_cast<long>(before), static_cast<int>(g_tabs.size()) - 1);
+		} else if (!side.tabs.empty() && g_tabs[static_cast<size_t>(side.tabs.back())]->id == "terms" && entry->id != "terms" && SavedOf("terms") == nullptr) {
+			// the Mod Book's own Terms tab stays the last one of its side (unless the player moved it)
 			if (side.current == static_cast<int>(side.tabs.size()) - 1) {
 				++side.current;
 			}
@@ -1650,7 +2021,7 @@ int __cdecl ApiAddTab(const modbook::Tab* tab) noexcept {
 		delete entry;
 		return 0;
 	}
-	LogF("tab '%s' (%s) is on the %s side", entry->id.c_str(), entry->title.c_str(), side.id);
+	LogF("tab '%s' (%s) is on the %s side%s", entry->id.c_str(), entry->title.c_str(), side.id, saved != nullptr ? " (where you dragged it)" : "");
 	side.dirty.store(true);
 	if (side.open.load()) {
 		AskJob();
@@ -1664,11 +2035,21 @@ bool Place(int handle, Side*& side, int& index) {
 	if (entry == nullptr) {
 		return false;
 	}
-	side                        = g_sides[entry->tab.side];
-	const std::vector<int> tabs = TabsOf(*side);
-	const auto             at   = std::find(tabs.begin(), tabs.end(), handle - 1);
-	index                       = static_cast<int>(at - tabs.begin());
-	return at != tabs.end();
+	for (Side* each : g_sides) { // the side it is on now (it may have been dragged)
+		const std::vector<int> tabs = TabsOf(*each);
+		const auto             at   = std::find(tabs.begin(), tabs.end(), handle - 1);
+		if (at != tabs.end()) {
+			side = each, index = static_cast<int>(at - tabs.begin());
+			return true;
+		}
+	}
+	return false;
+}
+
+int __cdecl ApiSideOf(int handle) noexcept {
+	Side* side  = nullptr;
+	int   index = 0;
+	return Place(handle, side, index) ? (side->right ? modbook::kRight : modbook::kLeft) : -1;
 }
 
 void __cdecl ApiRedraw(int handle) noexcept {
@@ -1845,7 +2226,7 @@ void AddTermsTab() {
 }
 
 constexpr modbook::Api kApi {
-	sizeof(modbook::Api), modbook::kApiVersion, ApiAddTab, ApiRedraw, ApiOpen, ApiToggle, ApiClose, ApiIsShown, ApiLabel, ApiSpot, ApiButton, ApiImage, ApiBar, ApiPager, ApiTitle,
+	sizeof(modbook::Api), modbook::kApiVersion, ApiAddTab, ApiRedraw, ApiOpen, ApiToggle, ApiClose, ApiIsShown, ApiLabel, ApiSpot, ApiButton, ApiImage, ApiBar, ApiPager, ApiTitle, ApiSideOf,
 };
 
 // ---------------------------------------------------------------- set-up
@@ -1865,7 +2246,16 @@ D2RL::Input::ActionResult __cdecl OnAction(const D2RL::PluginContext*, const D2R
 }
 
 D2RL::ConsoleCommandResult __cdecl OnConsole(D2R::Game::Client*, const D2RL::ConsoleCommandContext* context, void*) noexcept {
-	const bool right = context != nullptr && context->args != nullptr && context->argsLength != 0 && std::string(context->args, context->argsLength).find("right") != std::string::npos;
+	const std::string args = context != nullptr && context->args != nullptr ? std::string(context->args, context->argsLength) : std::string();
+	if (args.find("tabs") != std::string::npos && args.find("reset") != std::string::npos) {
+		const bool gone = DeleteFileW(OrderPath().c_str()) != 0 || GetLastError() == ERROR_FILE_NOT_FOUND;
+		AcquireSRWLockExclusive(&g_tabLock);
+		g_order.clear();
+		ReleaseSRWLockExclusive(&g_tabLock);
+		g_ctx->WriteConsoleMessage(gone ? "Mod Book: tab-order.txt deleted; the tabs are back in the plugins' own places from the next start." : "Mod Book: tab-order.txt could not be deleted.");
+		return D2RL::ConsoleCommandResult::Handled;
+	}
+	const bool right = args.find("right") != std::string::npos;
 	if (g_threads != nullptr) {
 		static_cast<void>(g_threads->runOnUiThread(g_ctx, right ? ToggleRight : ToggleLeft, nullptr));
 	} else {
@@ -1940,6 +2330,7 @@ void SetUp() {
 	g_panels  = panels;
 	g_off.clear();
 	InPlaceSetUp();
+	LoadOrder();
 	AddTermsTab();
 
 	const D2RL::InputService* input = nullptr;
@@ -1992,6 +2383,21 @@ D2RL_PLUGIN_EXPORT void ModBookWheel(int notches) noexcept {
 	Wheel(notches);
 }
 // Which side the cursor is over, for the test hosts: 0 left, 1 right, -1 ask the real cursor.
+// For the test host: a tab's button dragged to another side (onId: let go on that tab's button; empty: on the panel).
+D2RL_PLUGIN_EXPORT void ModBookDrag(const char* id, int to, const char* onId) noexcept {
+	TabMove move;
+	move.to = to == modbook::kRight ? modbook::kRight : modbook::kLeft;
+	AcquireSRWLockShared(&g_tabLock);
+	for (size_t i = 0; i < g_tabs.size(); ++i) {
+		move.handle = id != nullptr && g_tabs[i]->id == id ? static_cast<int>(i) + 1 : move.handle;
+		move.onTab  = onId != nullptr && g_tabs[i]->id == onId ? static_cast<int>(i) + 1 : move.onTab;
+	}
+	ReleaseSRWLockShared(&g_tabLock);
+	AcquireSRWLockExclusive(&g_typeLock);
+	g_moves.push_back(move);
+	ReleaseSRWLockExclusive(&g_typeLock);
+	AskJob();
+}
 D2RL_PLUGIN_EXPORT void ModBookSide(int side) noexcept {
 	g_testSide.store(side);
 }
@@ -2009,7 +2415,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		g_threads = nullptr;
 	}
 	SetUp();
-	static_cast<void>(context->RegisterConsoleCommand("modbook", OnConsole, "Mod Book: open or close the book (left side); modbook right = the legend"));
+	static_cast<void>(context->RegisterConsoleCommand("modbook", OnConsole, "Mod Book: open or close the book (left side); modbook right = the legend; modbook tabs reset = the tabs back where the plugins put them (tabs are moved by dragging their buttons)"));
 	// stay loaded: other plugins hold the Api, and the hooks' code is here
 	HMODULE self = nullptr;
 	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&Job), &self);

@@ -8,5 +8,5 @@ mkdir -p build
 x86_64-w64-mingw32-windres -I "$SDK" live-properties.rc -O coff -o build/resources.o
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -Wextra -Wno-missing-field-initializers -fno-exceptions -fno-rtti -Wno-unknown-pragmas -I "$SDK" \
   -shared -s -static -static-libgcc -static-libstdc++ \
-  -o build/d2rl-live-properties.dll plugin.cpp prop_core.cpp build/resources.o
+  -o build/d2rl-live-properties.dll plugin.cpp prop_core.cpp affix_core.cpp build/resources.o
 ls -la build/d2rl-live-properties.dll

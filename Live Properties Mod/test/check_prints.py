@@ -17,7 +17,7 @@ constants = {name: int(value, 16) for name, value in re.findall(r'constexpr \w+ 
 stamp = struct.unpack_from('<I', image, struct.unpack_from('<I', image, 0x3c)[0] + 8)[0]
 check(stamp == constants['kKnownStamp'], 'image stamp %08x is the one the plugin knows' % stamp)
 prints = re.findall(r'\{ (k\w+|0x[0-9a-f]+), "([^"]+)", (true|false), (\d+), \{ ([^}]+) \} \}', source)
-check(len(prints) == 13, '%d fingerprints found in plugin.cpp' % len(prints))
+check(len(prints) == 19, '%d fingerprints found in plugin.cpp' % len(prints))
 for where, what, entry, size, data in prints:
     rva = constants[where] if where in constants else int(where, 16)
     want = bytes(int(b, 16) for b in data.split(','))

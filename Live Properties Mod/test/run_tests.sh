@@ -9,6 +9,9 @@ status=0
 echo "== core"
 g++ -std=c++20 -O2 -Wall -Wextra -o build/core_test test/core_test.cpp prop_core.cpp
 ./build/core_test || status=1
+echo "== affixes"
+g++ -std=c++20 -O2 -Wall -Wextra -o build/affix_test test/affix_test.cpp affix_core.cpp
+./build/affix_test "${EXCEL:-../vanilla/data/global/excel/}" || status=1
 echo "== addresses"
 python3 test/check_prints.py plugin.cpp "${IMAGE:-../bin/D2RLoader_6ab3782c_dump.exe}" || status=1
 exit $status

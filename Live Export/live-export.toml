@@ -1,0 +1,3 @@
+# Live Export: writes the mod being played with the Live Suite's edits in it, only when asked
+# (console: export, or the Mod Book tab Export). It has no settings.
+# What it writes: d2rloader\live-suite\mod-export\<name>\ (a whole mod) and <name>-d2rmm\ (a D2RMM mod).

@@ -766,8 +766,17 @@ int main(int argc, char** argv) {
 	const uint8_t* const       gameRows = rotw->rows;
 	const std::vector<uint8_t> gameCopy(rotw->rows, rotw->rows + rotw->count * kWide);
 	D2RL::Lifecycle::DataTablesLoadedEvent event { D2RL::Lifecycle::DataTablesLoadedEventSize, 0, 1 };
+	// a folder in the old place (before the Live Suite folder) is moved over at the first start
+	const std::string oldOwn = work + "\\d2rloader\\live-cube-recipes\\TestMod";
+	CreateDirectoryA((work + "\\d2rloader").c_str(), nullptr);
+	CreateDirectoryA((work + "\\d2rloader\\live-cube-recipes").c_str(), nullptr);
+	CreateDirectoryA(oldOwn.c_str(), nullptr);
+	WriteText(oldOwn + "\\kept.txt", "a file of the user's");
 	g_tablesListener(&g_context, &event, nullptr);
-	const std::string own      = work + "\\d2rloader\\live-cube-recipes\\TestMod";
+	const std::string own      = work + "\\d2rloader\\live-suite\\live-cube-recipes\\TestMod";
+	Check(ReadText(own + "\\kept.txt") == "a file of the user's" && GetFileAttributesA(oldOwn.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesA((work + "\\d2rloader\\live-cube-recipes").c_str()) == INVALID_FILE_ATTRIBUTES
+			&& Logged("your files were moved from the old place, d2rloader\\live-cube-recipes, to d2rloader\\live-suite"),
+		"the plugin's folder in the old place (d2rloader\\live-cube-recipes) is moved into d2rloader\\live-suite with what it holds");
 	const std::string mineFile = own + "\\recipes.txt", mineBase = own + "\\recipes-classic-lod.txt";
 	Check(Logged("check (read only) of 16 lines of the mod's cubemain.txt against the game's own records: 16 the same at the line's place, 0 the same elsewhere in the list, 0 not found"),
 		"at start, sampled lines of the mod's file compile to exactly the game's records");
@@ -930,6 +939,36 @@ int main(int argc, char** argv) {
 			tab("Tab0");
 			Check(second && found && value && Widget("Title0").rfind("nor  -  normal quality", 0) == 0 && Widget("Page") == firstPage,
 				"the legend's second tab has the columns and their values (op 18, class = war ...); the first tab comes back as it was");
+			// the player drags a tab's button: Recipe Terms onto the recipe book's tab on the left, then back onto Terms
+			const auto drag = reinterpret_cast<void (*)(const char*, int, const char*)>(reinterpret_cast<void*>(GetProcAddress(modBook, "ModBookDrag")));
+			char exe[MAX_PATH] = {};
+			GetModuleFileNameA(nullptr, exe, MAX_PATH);
+			const std::string orderFile = std::string(exe).substr(0, std::string(exe).find_last_of('\\')) + "\\d2rloader\\live-suite\\mod-book\\tab-order.txt"; // the game's folder = the host's
+			DeleteFileA(orderFile.c_str());
+			bool dragged = false, back = false;
+			std::string order, why;
+			if (drag != nullptr) {
+				drag("legendcolumns", 0, "recipes");
+				Pump(400);
+				g_view = "Left";
+				const bool left = OpenBook() != nullptr && Widget("DoTab0") == "[ Recipe Terms ]" && Widget("DoTab1") == "[ Cube Recipes ]" && Widget("Title0").rfind("op  -  one extra condition", 0) == 0;
+				why = Widget("DoTab0") + " | " + Widget("Title0");
+				g_view = "Right";
+				const bool right = OpenBook() != nullptr && Widget("Title0").rfind("nor  -  normal quality", 0) == 0;
+				order = ReadText(orderFile);
+				dragged = left && right && order.find("Left\tlegendcolumns\t-\r\nLeft\trecipes\t-\r\nRight\tlegendwords\tCube Recipes") != std::string::npos;
+				drag("legendcolumns", 1, "terms");
+				Pump(400);
+				g_view = "Left";
+				back = OpenBook() != nullptr && Widget("DoTab1") == "<none>";
+				g_view = "Right";
+				order = ReadText(orderFile);
+				why += " | " + std::to_string(dragged) + std::to_string(back) + " | " + order;
+				back = back && order.find("Right\tlegendwords\tCube Recipes\r\nRight\tlegendcolumns\tGeneral\r\nRight\tterms\tGeneral") != std::string::npos;
+				tab("Tab0");
+			}
+			DeleteFileA(orderFile.c_str());
+			Check(dragged && back, "a tab's button dragged to the other side: the tab goes there, draws its own page, and tab-order.txt keeps the order; dragged back it takes its group again (" + why + ")");
 			bookSide(-1);
 		}
 		g_view = "Left";
@@ -1099,7 +1138,7 @@ int main(int argc, char** argv) {
 	const uint8_t* const sameList = rotw->rows;
 	TypeRecipes();
 	Pump(1000, [&] { return Consoled("nothing changed since it was last read", consoleFrom); });
-	Check(rotw->rows == sameList && Consoled("reading", consoleFrom) && Consoled("d2rloader\\live-cube-recipes\\TestMod\\recipes.txt", consoleFrom) && Consoled("nothing changed since it was last read", consoleFrom),
+	Check(rotw->rows == sameList && Consoled("reading", consoleFrom) && Consoled("d2rloader\\live-suite\\live-cube-recipes\\TestMod\\recipes.txt", consoleFrom) && Consoled("nothing changed since it was last read", consoleFrom),
 		"the command with an unchanged file says where the file is and that nothing changed");
 
 	// ---- D2RLoader's reload (or the next start): the game reads its tables again; the file is laid over them at once
@@ -1348,12 +1387,12 @@ int main(int argc, char** argv) {
 			};
 			const bool newKey = combo('N', 2) && Widget("Title") == "New Recipe" && Widget("Page") == "cells 1 - 10 of 10" && Widget("Name6") == "output" && Widget("Name7") == "mod 1" && Widget("DoCells") == "[ All cells ]";
 			click("Cells");
-			const bool all = Widget("DoCells") == "[ Fewer cells ]" && Widget("Page") == "cells 1 - 12 of 105" && Widget("Name10") == "output" && Widget("ScrollMark") != "<none>";
+			const bool all = Widget("DoCells") == "[ Fewer cells ]" && Widget("Page") == "cells 1 - 11 of 105" && Widget("Name10") == "output" && Widget("ScrollMark") != "<none>";
 			bookWheel(-120);
 			Pump(150);
-			const bool wheeled = Widget("Page") == "cells 3 - 14 of 105" && Widget("Name0") == "numinputs";
+			const bool wheeled = Widget("Page") == "cells 3 - 13 of 105" && Widget("Name0") == "numinputs";
 			page(VK_NEXT);
-			const bool paged = Widget("Page") == "cells 15 - 26 of 105";
+			const bool paged = Widget("Page") == "cells 14 - 24 of 105";
 			click("Cells");
 			Check(newKey && all && wheeled && paged && Widget("Page") == "cells 1 - 10 of 10" && Widget("Value0") == "_",
 				"Ctrl+N starts a new recipe; the editor shows the usual cells, \"All cells\" every one, and the wheel and Page Down scroll them (" + Widget("Page") + ")");

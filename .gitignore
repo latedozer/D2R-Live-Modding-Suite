@@ -84,3 +84,25 @@ __pycache__/
 !/Save Scan/test/*.cpp
 !/Save Scan/test/*.py
 !/Save Scan/test/*.sh
+
+# Live Export plugin: own source, scripts, tests only (build/ holds exported test tables).
+!/Live Export/
+/Live Export/*
+!/Live Export/*.cpp
+!/Live Export/*.h
+!/Live Export/*.sh
+!/Live Export/*.rc
+!/Live Export/*.toml
+!/Live Export/*.md
+!/Live Export/test/
+/Live Export/test/*
+!/Live Export/test/*.cpp
+!/Live Export/test/*.mjs
+!/Live Export/test/*.sh
+
+# The release folder: the built DLLs, their READMEs, the third-party notices and license texts.
+!/Suite .dlls/
+/Suite .dlls/*
+!/Suite .dlls/*.dll
+!/Suite .dlls/*.md
+!/Suite .dlls/LICENSES/

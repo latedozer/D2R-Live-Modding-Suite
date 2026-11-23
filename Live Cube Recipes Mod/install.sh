@@ -23,4 +23,4 @@ fi
 cp build/d2rl-live-cube-recipes.dll "$DEST/d2rl-live-cube-recipes.dll.installing"
 mv "$DEST/d2rl-live-cube-recipes.dll.installing" "$DEST/d2rl-live-cube-recipes.dll"
 ls -la "$DEST/d2rl-live-cube-recipes.dll"
-echo "installed. Start the game once; your recipe file is then d2rloader/live-cube-recipes/<mod>/recipes.txt (README.txt beside it)."
+echo "installed. Start the game once; your recipe file is then d2rloader/live-suite/live-cube-recipes/<mod>/recipes.txt (README.txt beside it)."

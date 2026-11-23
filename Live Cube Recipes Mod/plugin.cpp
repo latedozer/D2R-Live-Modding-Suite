@@ -45,7 +45,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.14.1";
+constexpr const char* kVersion = "0.15.0";
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -451,7 +451,26 @@ void Say(const std::string& text) {
 
 // ---------------------------------------------------------------- the plugin's own folder
 
-// <loader folder>\live-cube-recipes\<mod>: beside the plugins folder this DLL was loaded from,
+std::string g_moved; // set when the folder was moved from the old place (logged at start)
+// d2rloader\live-suite\<plugin>\<mod> (every plugin of the Live Suite keeps its files under
+// live-suite). A folder in the old place, d2rloader\<plugin>\<mod>, is moved there once.
+std::wstring SuiteFolder(const std::wstring& loader, const wchar_t* plugin, const std::wstring& mod, std::string& moved) {
+	const std::wstring now = loader + L"\\live-suite\\" + plugin + L"\\" + mod, old = loader + L"\\" + plugin + L"\\" + mod;
+	const DWORD        was = GetFileAttributesW(old.c_str());
+	if (GetFileAttributesW(now.c_str()) == INVALID_FILE_ATTRIBUTES && was != INVALID_FILE_ATTRIBUTES && (was & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+		CreateDirectoryW((loader + L"\\live-suite").c_str(), nullptr);
+		CreateDirectoryW((loader + L"\\live-suite\\" + plugin).c_str(), nullptr);
+		if (MoveFileExW(old.c_str(), now.c_str(), 0)) {
+			RemoveDirectoryW((loader + L"\\" + plugin).c_str()); // only goes when empty
+			moved = "moved from the old place, d2rloader\\" + std::string(plugin, plugin + wcslen(plugin)) + ", to d2rloader\\live-suite";
+		} else {
+			moved = "could not be moved from the old place (error " + std::to_string(GetLastError()) + "); a new folder is used";
+		}
+	}
+	return now;
+}
+
+// <loader folder>\live-suite\live-cube-recipes\<mod>: beside the plugins folder this DLL was loaded from,
 // else the game's d2rloader folder. Never inside a mod's .mpq.
 std::wstring OwnFolder() {
 	std::wstring loader;
@@ -467,7 +486,7 @@ std::wstring OwnFolder() {
 		loader = GameDirectory() + L"\\d2rloader";
 	}
 	const std::string mod = g_ctx->activeMod != nullptr && g_ctx->activeMod[0] != '\0' ? g_ctx->activeMod : "no mod";
-	return loader + L"\\live-cube-recipes\\" + Widen(mod);
+	return SuiteFolder(loader, L"live-cube-recipes", Widen(mod), g_moved);
 }
 
 void MakeFolders(const std::wstring& path) {
@@ -511,7 +530,8 @@ bool WriteOwn(const std::wstring& path, const std::string& text) {
 }
 
 // Recipe files under a loader folder that end in `tail` (other plugins keep changed copies of
-// the mod's tables there). Read only. The plugin's own folder and the log folders are left out.
+// the mod's tables there). Read only. The plugin's own folder, the log folders and the Live
+// Suite's exported mods are left out.
 void FindCopies(const std::wstring& folder, const std::wstring& tail, int depth, std::vector<std::wstring>& found) {
 	WIN32_FIND_DATAW entry {};
 	const HANDLE     find = FindFirstFileW((folder + L"\\*").c_str(), &entry);
@@ -523,7 +543,8 @@ void FindCopies(const std::wstring& folder, const std::wstring& tail, int depth,
 		const std::wstring path = folder + L"\\" + name;
 		if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
 			if (depth > 0 && name != L"." && name != L".." && (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 && _wcsicmp(name.c_str(), L"live-cube-recipes") != 0 && _wcsicmp(name.c_str(), L"logs") != 0
-				&& _wcsicmp(name.c_str(), L"logs-saved") != 0 && _wcsicmp(name.c_str(), L"plugins") != 0 && _wcsicmp(name.c_str(), L"crashes") != 0) {
+				&& _wcsicmp(name.c_str(), L"logs-saved") != 0 && _wcsicmp(name.c_str(), L"plugins") != 0 && _wcsicmp(name.c_str(), L"crashes") != 0
+				&& _wcsicmp(name.c_str(), L"mod-export") != 0) { // exported mods (Live Export) are whole mods, not a plugin's copies
 				FindCopies(path, tail, depth - 1, found);
 			}
 		} else if (path.size() >= tail.size() && _wcsicmp(path.c_str() + path.size() - tail.size(), tail.c_str()) == 0 && found.size() < 16) {
@@ -832,6 +853,10 @@ void SetUp() {
 		service = nullptr;
 	}
 	g_folder = OwnFolder();
+	if (!g_moved.empty()) {
+		LogF("your files were %s", g_moved.c_str());
+		g_moved.clear();
+	}
 	for (uint8_t version = 3; version >= 1; --version) { // RotW first: it is the one people play
 		void* tables = g_link.tables(version);
 		if (tables == nullptr) {
@@ -1388,7 +1413,8 @@ std::string CardLayout(const Book& b, const std::string& panelName) {
 	return l.done();
 }
 
-constexpr int kEditRows = 12;
+constexpr int kEditRows = 11;
+constexpr int kEditTop  = 340; // the first cell's line, under the help
 
 // The cells of one recipe, twelve at a time; a click picks the cell that is typed into.
 std::string EditLayout(const Book& b, const std::string& panelName) {
@@ -1400,8 +1426,10 @@ std::string EditLayout(const Book& b, const std::string& panelName) {
 	l.button("Cancel", 278, 150, 188, "Cancel", "$FontColorLightRed");
 	l.button("Name", 474, 150, 300, "Name it", "$FontColorLightTeal");
 	l.button("Cells", 782, 150, 300, e.allCells ? "Fewer cells" : "All cells");
-	l.label("Help", 82, 204, 990, 70, "$FontColorLightTeal", "left", true,
-		"Click a cell and type, or click a legend entry (Ctrl+L) to put its code in. Enter: done. Tab, arrows: other cell. Ctrl+V pastes. \"Name it\" writes the description.");
+	// Below the tab row (y 250 and lower moves down with it), two lines at most: above it, a
+	// third line ran into the tab buttons.
+	l.label("Help", 82, 250, 990, 86, "$FontColorLightTeal", "left", true,
+		"Click a cell and type, or a legend entry (Ctrl+L). Enter: done. Tab, arrows: next cell. Ctrl+V: paste. \"Name it\": the description.");
 	for (int i = 0; i < kEditRows; ++i) {
 		const size_t at = top + static_cast<size_t>(i);
 		if (at >= e.fields.size()) {
@@ -1410,7 +1438,7 @@ std::string EditLayout(const Book& b, const std::string& panelName) {
 		const int          field  = e.fields[at];
 		const bool         active = static_cast<int>(at) == e.field;
 		const std::string& text   = field < 0 ? e.edit.description : e.edit.cell[static_cast<size_t>(field)];
-		const int          y      = 290 + i * 78;
+		const int          y      = kEditTop + i * 78;
 		l.label("Name" + std::to_string(i), 82, y, 290, 70, active ? "$FontColorWhite" : "$FontColorGoldYellow", "left", false, CellName(field));
 		// the end of a long cell is what is being typed
 		l.label("Value" + std::to_string(i), 380, y, 680, 70, active ? "$FontColorWhite" : "$FontColorLightGold", "left", true,
@@ -1422,7 +1450,7 @@ std::string EditLayout(const Book& b, const std::string& panelName) {
 	}
 	char text[120];
 	snprintf(text, sizeof(text), "cells %zu - %zu of %zu", top + 1, top + kEditRows < e.fields.size() ? top + kEditRows : e.fields.size(), e.fields.size());
-	l.bar(290, top, kEditRows, e.fields.size());
+	l.bar(kEditTop, top, kEditRows, e.fields.size());
 	l.pager(top > 0, top + kEditRows < e.fields.size(), text);
 	return l.done();
 }
@@ -1502,7 +1530,7 @@ std::string ConfirmLayout(const Book& b, const std::string& panelName) {
 	return l.done();
 }
 
-constexpr size_t kTemplateRows = 10;
+constexpr size_t kTemplateRows = 9;
 
 // The saved lists: keep the book's list under a name, load one back, delete one.
 std::string TemplatesLayout(const Book& b, const std::string& panelName) {
@@ -1511,19 +1539,19 @@ std::string TemplatesLayout(const Book& b, const std::string& panelName) {
 	l.title("Recipe Templates");
 	l.button("Back", 82, 150, 200, "Back");
 	l.button("SaveAs", 330, 150, 742, "Save the list in the book as a template", "$FontColorGreen");
-	l.label("Help", 82, 204, 990, 70, "$FontColorLightTeal", "left", true,
-		"A template is a whole recipe list kept under a name. Loading one puts it into the book in place of the list there; the cube has it once you save.");
+	l.label("Help", 82, 250, 990, 86, "$FontColorLightTeal", "left", true,
+		"A template is a whole recipe list kept under a name. Loading one replaces the book's list; the cube has it once you save.");
 	if (e.templates.empty()) {
-		l.label("None", 82, 320, 990, 40, "$FontColorGoldYellow", "center", false, "No template saved yet.");
+		l.label("None", 82, 370, 990, 40, "$FontColorGoldYellow", "center", false, "No template saved yet.");
 	}
 	for (size_t i = 0; i < e.templates.size() && i < kTemplateRows; ++i) {
-		const int y = 300 + static_cast<int>(i) * 96;
+		const int y = 350 + static_cast<int>(i) * 96;
 		l.label("Name" + std::to_string(i), 82, y, 990, 40, "$FontColorLightGold", "left", false, Fit(e.templates[i].name, 44) + "   (" + std::to_string(e.templates[i].recipes) + " recipes)");
 		l.button("Load" + std::to_string(i), 120, y + 42, 200, "Load");
 		l.button("Delete" + std::to_string(i), 360, y + 42, 220, "Delete", "$FontColorLightRed");
 	}
 	if (e.templates.size() > kTemplateRows) {
-		l.label("More", 82, 300 + static_cast<int>(kTemplateRows) * 96, 990, 40, "$FontColorGoldYellow", "left", false,
+		l.label("More", 82, 350 + static_cast<int>(kTemplateRows) * 96, 990, 40, "$FontColorGoldYellow", "left", false,
 			"... and " + std::to_string(e.templates.size() - kTemplateRows) + " more in the templates folder");
 	}
 	return l.done();
@@ -1849,7 +1877,7 @@ void BookAsk(D2RL::Threads::Callback job) {
 
 void BookClose(Book& b) {
 	if (g_book != nullptr) {
-		g_book->close(b.right ? modbook::kRight : modbook::kLeft);
+		g_book->close(modbook::SideOf(g_book, b.handle[b.legend ? b.tab : 0], b.right ? modbook::kRight : modbook::kLeft)); // the player may have dragged the tab
 	}
 	b.open.store(false);
 }
@@ -2527,7 +2555,12 @@ struct TabRef {
 TabRef g_tabRefs[] = { { &g_recipeBook, 0 }, { &g_legendBook, 0 }, { &g_legendBook, 1 } };
 
 void __cdecl TabDraw(void* user, modbook::Page* page) noexcept {
-	Book& b = *static_cast<TabRef*>(user)->book;
+	const TabRef& ref = *static_cast<TabRef*>(user);
+	Book&         b   = *ref.book;
+	if (b.legend && b.tab != ref.tab) { // the legend's two tabs dragged to different sides: each draws its own
+		b.tab = ref.tab;
+		b.top = 0;
+	}
 	g_page  = page;
 	BookRefresh(b);
 	static_cast<void>(BookLayout(b, std::string()));

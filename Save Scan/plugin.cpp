@@ -33,7 +33,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.1.0";
+constexpr const char* kVersion = "0.2.0";
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -198,9 +198,28 @@ std::string ModName() {
 	return g_ctx->activeMod != nullptr ? g_ctx->activeMod : "";
 }
 
-// <loader folder>\save-scan\<mod>: beside the plugins folder. Never inside a mod's .mpq.
+std::string g_moved; // set when the folder was moved from the old place (logged at start)
+// d2rloader\live-suite\<plugin>\<mod> (every plugin of the Live Suite keeps its files under
+// live-suite). A folder in the old place, d2rloader\<plugin>\<mod>, is moved there once.
+std::wstring SuiteFolder(const std::wstring& loader, const wchar_t* plugin, const std::wstring& mod, std::string& moved) {
+	const std::wstring now = loader + L"\\live-suite\\" + plugin + L"\\" + mod, old = loader + L"\\" + plugin + L"\\" + mod;
+	const DWORD        was = GetFileAttributesW(old.c_str());
+	if (GetFileAttributesW(now.c_str()) == INVALID_FILE_ATTRIBUTES && was != INVALID_FILE_ATTRIBUTES && (was & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+		CreateDirectoryW((loader + L"\\live-suite").c_str(), nullptr);
+		CreateDirectoryW((loader + L"\\live-suite\\" + plugin).c_str(), nullptr);
+		if (MoveFileExW(old.c_str(), now.c_str(), 0)) {
+			RemoveDirectoryW((loader + L"\\" + plugin).c_str()); // only goes when empty
+			moved = "moved from the old place, d2rloader\\" + std::string(plugin, plugin + wcslen(plugin)) + ", to d2rloader\\live-suite";
+		} else {
+			moved = "could not be moved from the old place (error " + std::to_string(GetLastError()) + "); a new folder is used";
+		}
+	}
+	return now;
+}
+
+// <loader folder>\live-suite\save-scan\<mod>: beside the plugins folder. Never inside a mod's .mpq.
 std::wstring OwnFolder() {
-	return LoaderFolder() + L"\\save-scan\\" + Widen(ModName().empty() ? "no mod" : ModName());
+	return SuiteFolder(LoaderFolder(), L"save-scan", Widen(ModName().empty() ? "no mod" : ModName()), g_moved);
 }
 
 void MakeFolders(const std::wstring& path) {
@@ -589,6 +608,10 @@ int __cdecl ApiDump(char* path, uint32_t pathSize, savescan::Summary* summary, s
 	int done = 0;
 	if (scan.ran) {
 		const std::wstring folder = OwnFolder(), file = folder + L"\\items.txt";
+		if (!g_moved.empty()) {
+			LogF("its files were %s", g_moved.c_str());
+			g_moved.clear();
+		}
 		MakeFolders(folder);
 		done = WriteOwn(file, DumpText(scan)) ? 1 : 0;
 		if (path != nullptr && pathSize != 0) {

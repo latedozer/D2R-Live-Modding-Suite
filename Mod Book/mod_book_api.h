@@ -16,6 +16,7 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace modbook {
@@ -62,7 +63,17 @@ struct Api {
 	void(__cdecl* bar)(Page*, int y, uint64_t top, uint64_t shown, uint64_t count) noexcept;                                       // where a list stands
 	void(__cdecl* pager)(Page*, int before, int after, const char* text) noexcept;                                                 // the arrows (they call move) and the line between them
 	void(__cdecl* title)(Page*, const char* text) noexcept;                                                                        // the panel's title for this page (default: the tab's title)
+
+	// Mod Book 0.6.0 and later (check size first, or use SideOf below): the side a tab is on now.
+	// The player can drag tabs to the other side, so a tab's side is not always the one it asked for.
+	int(__cdecl* sideOf)(int tab) noexcept; // kLeft, kRight; -1: no such tab
 };
+
+// The side a tab is on now; `asked` (the side it was added to) with a Mod Book from before 0.6.0.
+inline int SideOf(const Api* api, int tab, int asked) {
+	const int side = api != nullptr && api->size >= offsetof(Api, sideOf) + sizeof(api->sideOf) && api->sideOf != nullptr ? api->sideOf(tab) : -1;
+	return side >= 0 ? side : asked;
+}
 
 // The Api of the Mod Book plugin loaded in this game, or nullptr.
 inline const Api* Find() {
@@ -72,7 +83,7 @@ inline const Api* Find() {
 	}
 	const auto get = reinterpret_cast<const Api*(__cdecl*)(uint32_t)>(reinterpret_cast<void*>(GetProcAddress(module, "ModBookGetApi")));
 	const Api* api = get != nullptr ? get(kApiVersion) : nullptr;
-	return api != nullptr && api->size >= sizeof(Api) ? api : nullptr;
+	return api != nullptr && api->size >= offsetof(Api, sideOf) ? api : nullptr; // a Mod Book from before sideOf is still used
 }
 
 } // namespace modbook
