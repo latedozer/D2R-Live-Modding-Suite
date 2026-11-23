@@ -21,7 +21,8 @@ echo "== plugin under Wine"
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -shared -static -static-libgcc -static-libstdc++ -o build/D2RCore.dll test/fake_core.cpp
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -Wno-missing-field-initializers -static -static-libgcc -static-libstdc++ -I "$SDK" -o build/fake_host.exe test/fake_host.cpp
 WORK="$(mktemp -d)"
-( cd build && WINEDEBUG=-all timeout 300 wine fake_host.exe "$(winepath -w "$PWD/d2rl-live-cube-recipes.dll")" "$(winepath -w "$WORK")" "$(winepath -w "$EXCEL")" 2>/dev/null ) > build/fake_host.out || status=1
+( cd "../Mod Book" && ./build.sh > /dev/null )
+( cd build && WINEDEBUG=-all timeout 300 wine fake_host.exe "$(winepath -w "$PWD/d2rl-live-cube-recipes.dll")" "$(winepath -w "$WORK")" "$(winepath -w "$EXCEL")" "$(winepath -w "$PWD/../../Mod Book/build/d2rl-mod-book.dll")" 2>/dev/null ) > build/fake_host.out || status=1
 grep -E '^(ok|FAIL|ALL|FAILURES)' build/fake_host.out || status=1
 grep -q '^ALL PASSED' build/fake_host.out || status=1
 python3 - "$WORK/RecipeBookhd.json" <<'PY' || status=1
@@ -34,8 +35,8 @@ try:
         for child in node.get("children", []):
             walk(child)
     walk(layout)
-    ok = layout["type"] == "Panel" and layout["name"].startswith("live-cube-recipes/RecipeBook") and len(names) == len(set(names)) and "Title7" in names and "Detail7" in names
-    print(("ok  : " if ok else "FAIL: ") + "the panel layout is strict JSON, rooted at a Panel with the plugin's name, %d widgets with names of their own" % len(names))
+    ok = layout["type"] == "Panel" and layout["name"].startswith("mod-book/Left") and len(names) == len(set(names)) and "Title7" in names and "Detail7" in names
+    print(("ok  : " if ok else "FAIL: ") + "the panel layout is strict JSON, rooted at a Panel with the Mod Book's name, %d widgets with names of their own" % len(names))
     sys.exit(0 if ok else 1)
 except Exception as error:
     print("FAIL: the panel layout is not valid JSON:", error)

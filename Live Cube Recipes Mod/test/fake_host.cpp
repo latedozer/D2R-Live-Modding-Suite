@@ -317,7 +317,7 @@ int                    g_breaches = 0, g_unloads = 0;
 
 FakePanel* PanelByPath(const std::string& path) {
 	for (FakePanel& panel : g_panelsFake) {
-		if (path == "data/global/ui/layouts/live-cube-recipes/" + panel.localId + "hd.json") {
+		if (path == "data/global/ui/layouts/mod-book/" + panel.localId + "hd.json") {
 			return &panel;
 		}
 	}
@@ -327,7 +327,7 @@ int g_buttonPictures = 0, g_scrollPictures = 0;
 D2RL::Resources::Result __cdecl RegisterResource(const D2RL::PluginContext*, const D2RL::Resources::ResourceRegistration* resource, D2RL::Resources::RegistrationHandle* handle) noexcept {
 	std::string path = resource->path;
 	if (path.size() > 7 && path.substr(path.size() - 7) == ".sprite") { // the hover picture and the buttons' pictures
-		bool right = resource->byteCount == 44 && memcmp(resource->bytes, "SpA1", 4) == 0 && path.find("data/hd/global/ui/d2rloader/live-cube-recipes/") == 0;
+		bool right = resource->byteCount == 44 && memcmp(resource->bytes, "SpA1", 4) == 0 && path.find("data/hd/global/ui/d2rloader/mod-book/") == 0;
 		if (path.find("/scroll") != std::string::npos && resource->byteCount > 40 && memcmp(resource->bytes, "SpA1", 4) == 0) {
 			right = true; // the scroll line and its mark
 			++g_scrollPictures;
@@ -408,7 +408,7 @@ D2RL::Widgets::Result __cdecl DispatchUiAction(const D2RL::PluginContext*, const
 		return D2RL::Widgets::Result::InvalidArgument;
 	}
 	for (FakePanel& panel : g_panelsFake) {
-		if ("live-cube-recipes/" + panel.localId == action->text) {
+		if ("mod-book/" + panel.localId == action->text) {
 			if (panel.open || GetTickCount64() - panel.closedAt < 1500) {
 				++g_breaches;
 			}
@@ -423,7 +423,7 @@ D2RL::WidgetService g_widgetService {};
 
 // The book on screen (g_view: "RecipeBook" or "Legend"): its open panel (two of one book open
 // at once is a breach).
-std::string g_view = "RecipeBook";
+std::string g_view = "Left";
 FakePanel* OpenBook() {
 	FakePanel* found = nullptr;
 	for (FakePanel& panel : g_panelsFake) {
@@ -478,7 +478,7 @@ D2RL::Input::ActionCallback      g_action      = nullptr, g_legendAction = nullp
 void*                            g_actionData  = nullptr, *g_legendActionData = nullptr;
 D2RL::Input::KeyListenerCallback g_keyListener = nullptr;
 D2RL::Input::Result __cdecl RegisterAction(const D2RL::PluginContext*, const D2RL::Input::ActionRegistration* registration, D2RL::Input::ActionHandle* handle) noexcept {
-	if (strcmp(registration->logicalId, "recipe-book") == 0) {
+	if (strcmp(registration->logicalId, "book") == 0) {
 		g_action     = registration->callback;
 		g_actionData = registration->userData;
 	} else {
@@ -727,6 +727,10 @@ int main(int argc, char** argv) {
 	g_context.pluginDirectory = pluginDirectory.c_str();
 	g_context.buildVersion = "test";
 
+	// the Mod Book first (argv[4]): the panels are its; this plugin puts its books in as tabs
+	const HMODULE modBook = argc > 4 ? LoadLibraryA(argv[4]) : nullptr;
+	const auto    bookLoad = modBook != nullptr ? reinterpret_cast<D2RL::LoadPluginFn>(reinterpret_cast<void*>(GetProcAddress(modBook, D2RL_PLUGIN_LOAD_EXPORT))) : nullptr;
+	Check(bookLoad != nullptr && bookLoad(&g_context), "the Mod Book plugin loads and starts");
 	const HMODULE plugin = LoadLibraryA(argv[1]);
 	Check(plugin != nullptr, "the plugin loads");
 	if (plugin == nullptr) {
@@ -787,8 +791,8 @@ int main(int argc, char** argv) {
 	Check(rotw->rows == gameRows && memcmp(rotw->rows, gameCopy.data(), gameCopy.size()) == 0 && (rotw->capacity & kNotOwned) == 0, "with no recipes of the user's the game's list is left alone");
 
 	// ---- the recipe book
-	const auto bookKey   = reinterpret_cast<bool (*)(unsigned, int)>(reinterpret_cast<void*>(GetProcAddress(plugin, "LiveCubeRecipesBookKey")));
-	const auto bookWheel = reinterpret_cast<void (*)(int)>(reinterpret_cast<void*>(GetProcAddress(plugin, "LiveCubeRecipesBookWheel")));
+	const auto bookKey   = reinterpret_cast<bool (*)(unsigned, int)>(reinterpret_cast<void*>(GetProcAddress(modBook, "ModBookKey")));
+	const auto bookWheel = reinterpret_cast<void (*)(int)>(reinterpret_cast<void*>(GetProcAddress(modBook, "ModBookWheel")));
 	const auto type = [&](const char* text) {
 		for (const char* c = text; *c != '\0'; ++c) {
 			bookKey(*c == ' ' ? VK_SPACE : *c == ',' ? VK_OEM_COMMA : *c == '=' ? VK_OEM_PLUS : static_cast<unsigned>(toupper(*c)), 0);
@@ -796,8 +800,8 @@ int main(int argc, char** argv) {
 		Pump(120);
 	};
 	{
-		Check(g_panelsFake.size() == 48 && g_legendCommand != nullptr && g_legendAction != nullptr && g_bookCommand != nullptr && g_uiListener != nullptr && g_action != nullptr && bookKey != nullptr && bookWheel != nullptr && Logged("panels: ready"),
-			"on a loader as short as D2RLoader 1.3.1 the two books are set up: 24 panels each, console commands, keys, message listener");
+		Check(g_panelsFake.size() == 64 && g_legendCommand != nullptr && g_legendAction != nullptr && g_bookCommand != nullptr && g_uiListener != nullptr && g_action != nullptr && bookKey != nullptr && bookWheel != nullptr && Logged("panels: ready"),
+			"on a loader as short as D2RLoader 1.3.1 the two books are set up: 32 panels each, console commands, keys, message listener");
 		const auto about = [&](size_t line) { // a title as the panel has room for it: the result first
 			const std::string text = ResultFirst(Split(g_stock[0].lines[line + 1], '\t')[0]);
 			return text.size() <= 58 ? text : text.substr(0, 55) + "...";
@@ -806,7 +810,7 @@ int main(int argc, char** argv) {
 			if (Widget(button) == "<none>") {
 				return false; // no such button on the page
 			}
-			const std::string name = "live-cube-recipes/Click" + g_view + button;
+			const std::string name = "mod-book/Click" + g_view + button;
 			D2RL::SharedEvents::UiMessageEvent ui {};
 			ui.structSize = D2RL::SharedEvents::UiMessageEventSize;
 			ui.target     = "PanelManager";
@@ -835,8 +839,8 @@ int main(int argc, char** argv) {
 		Check(OpenBook() != nullptr && Widget("Title0") == about(0) && Widget("Title7") == about(7) && Widget("Page") == "1 - 8 of 227" && Widget("Previous") == "<none>" && Widget("Next") != "<none>"
 				&& Widget("Search") == "Type to search the recipes",
 			"recipebook opens the panel on the first 8 recipes (" + Widget("Title0") + " | " + Widget("Detail0") + " | " + Widget("Page") + ")");
-		Check(g_buttonPictures == 32 && Logged("buttons: the game's button picture (from the mod) in 16 widths") && OpenBook()->loaded.find("\"name\": \"DoNew\", \"fields\": { \"rect\": { \"x\": 82, \"y\": 262 }, \"filename\": \"d2rloader\\\\live-cube-recipes\\\\button232\"") != std::string::npos
-				&& OpenBook()->loaded.find("\"hoveredFrame\": 3") != std::string::npos && OpenBook()->loaded.find("live-cube-recipes/ClickRecipeBookNew\", \"textString\": \"New recipe\"") != std::string::npos && Widget("ClickNew") == "<none>",
+		Check(g_buttonPictures == 32 && Logged("buttons: the game's button picture (from the mod) in 16 widths") && OpenBook()->loaded.find("\"name\": \"DoNew\", \"fields\": { \"rect\": { \"x\": 82, \"y\": 262 }, \"filename\": \"d2rloader\\\\mod-book\\\\button232\"") != std::string::npos
+				&& OpenBook()->loaded.find("\"hoveredFrame\": 3") != std::string::npos && OpenBook()->loaded.find("mod-book/ClickLeftNew\", \"textString\": \"New recipe\"") != std::string::npos && Widget("ClickNew") == "<none>",
 			"buttons are the game's own button picture, resized for each width (and at half size for low resolution), with the text on the button");
 		Check(Widget("Detail0") == "hst  <-  msf + vip", "each recipe has its result and, after it, what goes in under it (" + Widget("Detail0") + ")");
 		{
@@ -846,7 +850,7 @@ int main(int argc, char** argv) {
 			const std::string  tip    = hover == std::string::npos ? "" : layout.substr(layout.find("\"tooltipString\": \"", hover) + 18, 400);
 			const std::string  whole  = ResultFirst(Split(g_stock[0].lines[4], '\t')[0]);
 			Check(Widget("Title3").size() == 58 && Widget("Title3").substr(55) == "..." && whole.size() > 58 && tip.find(whole.substr(whole.size() - 20)) != std::string::npos && tip.find("\\n") != std::string::npos
-					&& tip.find("<-") != std::string::npos && layout.find("d2rloader\\\\live-cube-recipes\\\\blank") != std::string::npos,
+					&& tip.find("<-") != std::string::npos && layout.find("d2rloader\\\\mod-book\\\\blank") != std::string::npos,
 				"a long recipe is cut in its row and whole (in lines) in the hover text of an unseen button over the row");
 		}
 		const FakePanel* first = OpenBook();
@@ -872,12 +876,13 @@ int main(int argc, char** argv) {
 		Check(Widget("Title0").empty() && Widget("Page") == "nothing has all of these words", "a search that finds nothing says so");
 		key(VK_DELETE);
 		// many pages in a row: the pool runs out of rested panels and waits, without breaking the rules
-		for (int i = 0; i < 40; ++i) {
-			bookKey(VK_NEXT, 0);
+		for (int i = 0; i < 140; ++i) { // back and forth, so that every turn is a page to draw
+			bookKey(i % 2 == 0 ? VK_NEXT : VK_PRIOR, 0);
 			Pump(20);
 		}
+		bookKey(VK_END, 0);
 		Pump(2500, [&] { return Widget("Page") == "220 - 227 of 227"; });
-		Check(Widget("Page") == "220 - 227 of 227" && g_breaches == 0 && g_unloads > 0, "40 quick page turns end on the last page; panels are reused only after their 1.5 s rest (" + std::to_string(g_unloads) + " reused)");
+		Check(Widget("Page") == "220 - 227 of 227" && g_breaches == 0 && g_unloads > 0, "140 quick page turns and End end on the last page; panels are reused only after their 1.5 s rest (" + std::to_string(g_unloads) + " reused)");
 		key(VK_HOME);
 		D2RL::Input::ActionEvent press {};
 		press.structSize = D2RL::Input::ActionEventSize;
@@ -891,18 +896,18 @@ int main(int argc, char** argv) {
 		Check(OpenBook() != nullptr && Widget("Page") == "1 - 8 of 227", "and opens it again");
 
 		// ---- the legend, on the other side
-		const auto bookSide = reinterpret_cast<void (*)(int)>(reinterpret_cast<void*>(GetProcAddress(plugin, "LiveCubeRecipesBookSide")));
+		const auto bookSide = reinterpret_cast<void (*)(int)>(reinterpret_cast<void*>(GetProcAddress(modBook, "ModBookSide")));
 		g_legendCommand(nullptr, &open, g_legendData);
 		Pump(120);
-		g_view = "Legend";
+		g_view = "Right";
 		const FakePanel* legendPanel = OpenBook();
 		Check(legendPanel != nullptr && legendPanel->loaded.find("$RightPanelRect") != std::string::npos && legendPanel->loaded.find("$RightHingeSprite") != std::string::npos
-				&& Widget("Title0").rfind("nor  -  normal quality", 0) == 0 && Widget("Detail0") == "recipe word: quality" && Widget("DoTab0") == "[ Words and codes ]" && Widget("DoTab1") == "[ Columns and values ]" && Widget("Search") == "Type a word or code: rar, shld, r10",
+				&& Widget("Title0").rfind("nor  -  normal quality", 0) == 0 && Widget("Detail0") == "recipe word: quality" && Widget("DoGroup0") == "[ General ]" && Widget("DoGroup1") == "[ Cube Recipes ]" && Widget("Search") == "Type a word or code: rar, shld, r10",
 			"recipelegend opens the legend on the right side of the screen (" + Widget("Title0") + " | " + Widget("Page") + ")");
 		{
 			// the second tab: the columns and what their values mean
 			const auto tab = [&](const char* which) {
-				const std::string name = std::string("live-cube-recipes/ClickLegend") + which;
+				const std::string name = std::string("mod-book/ClickRight") + which;
 				D2RL::SharedEvents::UiMessageEvent ui {};
 				ui.structSize = D2RL::SharedEvents::UiMessageEventSize;
 				ui.target     = "PanelManager";
@@ -927,28 +932,28 @@ int main(int argc, char** argv) {
 				"the legend's second tab has the columns and their values (op 18, class = war ...); the first tab comes back as it was");
 			bookSide(-1);
 		}
-		g_view = "RecipeBook";
+		g_view = "Left";
 		Check(OpenBook() != nullptr && Widget("Page") == "1 - 8 of 227", "the recipe book stays open on the left");
 		bookSide(1); // the cursor is over the legend
 		type("shld");
-		g_view = "Legend";
+		g_view = "Right";
 		bool shield = false;
 		for (int i = 0; i < 10; ++i) {
 			shield = shield || Widget(("Title" + std::to_string(i)).c_str()) == "shld  -  Any Shield";
 		}
 		Check(shield && Widget("Search") == "shld_", "with the cursor over the legend, typing looks a code up there (" + Widget("Page") + ")");
-		g_view = "RecipeBook";
+		g_view = "Left";
 		Check(Widget("Search") == "Type to search the recipes" && Widget("Page") == "1 - 8 of 227", "and the recipe book is not searched");
 		bookSide(0); // the cursor is over the recipe book
 		bookWheel(-120);
 		Pump(120);
 		Check(Widget("Page") == "3 - 10 of 227", "with the cursor over the recipe book, the wheel scrolls it");
-		g_view = "Legend";
+		g_view = "Right";
 		Check(Widget("Search") == "shld_", "and the legend stays as it was");
 		g_legendAction(&g_context, &press, g_legendActionData);
 		Pump(120);
 		Check(OpenBook() == nullptr, "the legend's key closes it");
-		g_view = "RecipeBook";
+		g_view = "Left";
 		bookKey(VK_HOME, 0);
 		Pump(120);
 		Check(OpenBook() != nullptr && bookKey('A', 0) && bookKey(VK_DELETE, 0), "the recipe book is still open and has the keyboard");
@@ -1120,9 +1125,9 @@ int main(int argc, char** argv) {
 
 	// ---- the editor in the recipe book. recipes.txt is the cube's whole list; an empty one starts as the game's own
 	{
-		g_view = "RecipeBook";
+		g_view = "Left";
 		const auto click = [&](const std::string& what) {
-			const std::string name = "live-cube-recipes/ClickRecipeBook" + what;
+			const std::string name = "mod-book/ClickLeft" + what;
 			D2RL::SharedEvents::UiMessageEvent ui {};
 			ui.structSize = D2RL::SharedEvents::UiMessageEventSize;
 			ui.target     = "PanelManager";
@@ -1304,7 +1309,7 @@ int main(int argc, char** argv) {
 		Check(found && added && Lines(ReadText(mineFile)).size() == 229 && rotw->count == 231 && g_breaches == 0, "Search for new recipes finds a recipe of the mod that is not in the list, asks, and adds it at the end");
 		// ---- keys, the clipboard, fewer cells, codes from the legend
 		{
-			const auto bookSide = reinterpret_cast<void (*)(int)>(reinterpret_cast<void*>(GetProcAddress(plugin, "LiveCubeRecipesBookSide")));
+			const auto bookSide = reinterpret_cast<void (*)(int)>(reinterpret_cast<void*>(GetProcAddress(modBook, "ModBookSide")));
 			const auto EditorHas = [](bool taken) { return !taken; }; // the key is the book's either way
 			const auto combo = [&](unsigned key, int mods) { // 1 Shift, 2 Ctrl
 				const bool taken = bookKey(key, mods);
@@ -1312,7 +1317,7 @@ int main(int argc, char** argv) {
 				return taken;
 			};
 			const auto legendClick = [&](const std::string& what) {
-				const std::string name = "live-cube-recipes/ClickLegend" + what;
+				const std::string name = "mod-book/ClickRight" + what;
 				D2RL::SharedEvents::UiMessageEvent ui {};
 				ui.structSize = D2RL::SharedEvents::UiMessageEventSize;
 				ui.target     = "PanelManager";
@@ -1373,7 +1378,7 @@ int main(int argc, char** argv) {
 			g_legendCommand(nullptr, &open, g_legendData);
 			Pump(200);
 			bookSide(1);
-			g_view = "Legend";
+			g_view = "Right";
 			page(VK_DELETE);
 			typeText("shld");
 			const int shield = rowOf("shld  -  ");
@@ -1382,23 +1387,23 @@ int main(int argc, char** argv) {
 			typeText("rar");
 			const int rare = rowOf("rar  -  ");
 			legendClick("Row" + std::to_string(rare));
-			g_view = "RecipeBook";
+			g_view = "Left";
 			const bool codes = shield >= 0 && rare >= 0 && Widget("Value4") == "shld,rar_";
-			g_view = "Legend";
+			g_view = "Right";
 			legendClick("Tab1");
 			legendClick("Row0"); // a column's explanation: nothing to put in
 			page(VK_DELETE);
 			typeText("op 18");
 			const int op = rowOf("op 18");
 			legendClick("Row" + std::to_string(op));
-			g_view = "RecipeBook";
+			g_view = "Left";
 			Check(codes && op >= 0 && Widget("Value4") == "shld,rar,18_", "a click on a legend entry puts its code into the cell typed into (with a comma in inputs); of the second tab only op and stat numbers (" + Widget("Value4") + ")");
-			g_view = "Legend";
+			g_view = "Right";
 			legendClick("Tab0");
 			page(VK_DELETE);
 			g_legendCommand(nullptr, &open, g_legendData);
 			Pump(200);
-			g_view = "RecipeBook";
+			g_view = "Left";
 			bookSide(-1);
 			page(VK_DELETE);
 			click("Field6");

@@ -1,0 +1,3 @@
+# Save Scan: reads every saved item when another plugin (or the console command savescan)
+# asks which items hold a stat. It does nothing otherwise and has no settings.
+# Saves are only read. What it writes on request: d2rloader\save-scan\<mod>\items.txt

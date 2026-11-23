@@ -30,10 +30,10 @@
 #include <D2RLPlugin/api.h>
 
 #include "cube_core.h"
+#include "../Mod Book/mod_book_api.h"
 
 #include <windows.h>
 
-#include <CascLib.h>
 
 #include <atomic>
 #include <cstdarg>
@@ -45,7 +45,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.13.1";
+constexpr const char* kVersion = "0.14.1";
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -1115,10 +1115,17 @@ void Ask() {
 	}
 }
 
+void BookSetUp();
+extern std::string g_bookOff;
+
 void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
 	{
 		Guard guard;
 		SetUp();
+	}
+	BookSetUp();
+	if (!g_bookOff.empty()) {
+		LogF("panels: not available - %s", g_bookOff.c_str());
 	}
 	FlushSay();
 }
@@ -1146,53 +1153,6 @@ void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::D
 // The recipe book is also the editor of the user's recipes.txt. It shows the list as it will
 // be with the changes made so far; nothing reaches the file or the cube before "Save".
 
-
-constexpr int      kBookSlots    = 24;
-constexpr uint64_t kBookCooldown = 1500; // ms a closed panel is left alone before it is unloaded
-
-constexpr char kBookClick[] = "live-cube-recipes/Click"; // + the book's id + what was clicked
-
-// The widths buttons come in: a picture is made for each at start.
-constexpr int kButtonWidths[] = { 116, 188, 200, 216, 220, 232, 250, 300, 330, 470, 480, 482, 500, 512, 700, 742 };
-bool          g_buttonArt     = false;
-bool          g_barArt        = false; // the scroll line's two pictures are registered
-constexpr int kTrackHeight = 840, kMarkHeight = 70;
-bool HasButtonArt(int width) {
-	if (!g_buttonArt) {
-		return false;
-	}
-	for (const int known : kButtonWidths) {
-		if (known == width) {
-			return true;
-		}
-	}
-	return false;
-}
-
-// Text inside a JSON string of a layout. Recipe files are Latin-1; the layout is UTF-8.
-std::string JsonText(const std::string& text) {
-	std::string out;
-	// a leading @ or $ would make D2R look the text up as a string key or a layout variable
-	if (!text.empty() && (text[0] == '@' || text[0] == '$')) {
-		out += ' ';
-	}
-	for (const char c : text) {
-		const auto u = static_cast<unsigned char>(c);
-		if (c == '"' || c == '\\') {
-			out += '\\';
-			out += c;
-		} else if (c == '\n') {
-			out += "\\n";
-		} else if (u < 0x20 || u >= 0x80) {
-			char code[8];
-			snprintf(code, sizeof(code), "\\u%04x", u < 0x20 ? 0x20u : u);
-			out += code;
-		} else {
-			out += c;
-		}
-	}
-	return out;
-}
 
 // Text broken into lines of at most `most` letters at spaces, for a hover box.
 std::string Wrapped(const std::string& text, size_t most) {
@@ -1223,15 +1183,6 @@ std::string Fit(const std::string& text, size_t most) {
 	return text.size() <= most ? text : text.substr(0, most - 3) + "...";
 }
 
-struct BookSlot {
-	std::string                         name;   // "live-cube-recipes/RecipeBook07"
-	std::string                         path;   // its layout resource
-	D2RL::Panels::RegistrationHandle    panel  = D2RL::Panels::InvalidHandle;
-	D2RL::Resources::RegistrationHandle layout = D2RL::Resources::InvalidHandle;
-	bool                                loaded   = false; // D2R holds a panel made from its layout
-	uint64_t                            closedAt = 0;     // when it was closed (0: open, or never used)
-};
-
 enum class View { List, Card, Edit, Prompt, Confirm, Templates, TemplateName };
 enum class Asked { Search, Restore, LoadTemplate, DeleteTemplate, RemoveRecipe };
 
@@ -1252,7 +1203,7 @@ struct Book {
 	std::atomic<int>         move { 0 };     // pages to go
 	std::atomic<int>         scroll { 0 };   // rows to go (the wheel)
 	std::atomic<int>         jump { 0 };     // -1 first page, 1 last page
-	std::atomic<bool>        redo { false }; // a page waits for a free panel of the pool
+	std::atomic<bool>        redo { false }; // the page must be drawn again
 	std::string              keys;           // typed: letters, '\b' backspace, '\x7f' delete, '\t' next cell
 	std::vector<std::string> clicks;         // "Row3", "Save", "Escape" ...
 
@@ -1262,10 +1213,8 @@ struct Book {
 	std::string              words;
 	std::vector<uint32_t>    found;
 	size_t                   top = 0; // the first entry shown
-	BookSlot                 slots[kBookSlots];
-	int                      active = -1; // the slot on screen
-	int                      cursor = 0;
 	int                      tab    = 0;  // the legend: 0 words and codes, 1 columns and values
+	int                      handle[2] = { 0, 0 }; // its tabs in the Mod Book (the legend has two)
 };
 Book    g_recipeBook { "RecipeBook", "Cube Recipes", "Type to search the recipes", false, false, 8 };
 Book    g_legendBook { "Legend", "Recipe Legend", "Type a word or code: rar, shld, r10", true, true, 9 };
@@ -1322,94 +1271,31 @@ Editor g_editor;
 
 // ---- layouts
 
+const modbook::Api* g_book = nullptr;       // the Mod Book plugin's interface; nullptr: not there
+modbook::Page*      g_page = nullptr;       // the page being drawn (inside a tab's draw only)
+std::string         g_bookOff = "not set up"; // why there are no books
+
+// A page's widgets. The frame, the title's place, the buttons' pictures and the click messages
+// are the Mod Book's; this hands it the texts and places.
 struct LayoutText {
-	std::string out;
 	const Book& book;
-	LayoutText(const Book& b, const std::string& panelName) : book(b) {
-		const std::string side = b.right ? "Right" : "Left";
-		out = "{\n\t\"type\": \"Panel\", \"name\": \"" + panelName + "\",\n\t\"fields\": { \"anchor\": \"$" + side + "PanelAnchor\", \"rect\": \"$" + side
-		    + "PanelRect\", \"priority\": 8500 },\n\t\"children\": [\n\t\t{ \"type\": \"ImageWidget\", \"name\": \"Background\", \"fields\": { \"filename\": \"PANEL\\\\PANEL_BG\" } },\n"
-		      "\t\t{ \"type\": \"ImageWidget\", \"name\": \"Hinge\", \"fields\": { \"rect\": \"$"
-		    + side + "HingeRect\", \"filename\": \"$" + side + "HingeSprite\" } },\n"
-		    + "\t\t{ \"type\": \"ClickCatcherWidget\", \"name\": \"ClickCatcher\", \"fields\": { \"rect\": \"$PanelClickCatcherRect\" } },\n";
-	}
-	void title(const std::string& text) {
-		out += "\t\t{ \"type\": \"TextBoxWidget\", \"name\": \"Title\", \"fields\": { \"rect\": \"$InGamePanelTitleRect\", \"style\": \"$StyleTitleBlock\", \"text\": \"" + JsonText(text) + "\" } },\n";
-	}
+	LayoutText(const Book& b, const std::string&) : book(b) {}
+	void title(const std::string& text) { g_book->title(g_page, text.c_str()); }
 	void label(const std::string& name, int x, int y, int width, int height, const char* color, const char* align, bool wrap, const std::string& text) {
-		char head[500];
-		snprintf(head, sizeof(head),
-			"\t\t{ \"type\": \"TextBoxWidget\", \"name\": \"%s\", \"fields\": { \"rect\": { \"x\": %d, \"y\": %d, \"width\": %d, \"height\": %d },"
-			" \"style\": { \"fontColor\": \"%s\", \"pointSize\": \"$SmallFontSize\", \"alignment\": { \"h\": \"%s\", \"v\": \"%s\" }%s }, \"text\": \"",
-			name.c_str(), x, y, width, height, color, align, wrap ? "top" : "center", wrap ? ", \"options\": { \"lineWrap\": true }" : "");
-		out += head + JsonText(text) + "\" } },\n";
+		g_book->label(g_page, name.c_str(), x, y, width, height, color, align, wrap ? 1 : 0, text.c_str());
 	}
 	// An unseen button over a place: a click sends `click` (when not empty), hovering shows `tip`.
 	void spot(const std::string& name, int x, int y, int width, int height, const std::string& click, const std::string& tip) {
-		char head[400];
-		snprintf(head, sizeof(head),
-			"\t\t{ \"type\": \"ButtonWidget\", \"name\": \"%s\", \"fields\": { \"rect\": { \"x\": %d, \"y\": %d, \"width\": %d, \"height\": %d },"
-			" \"filename\": \"d2rloader\\\\live-cube-recipes\\\\blank\", \"normalFrame\": 0, \"pressedFrame\": 0, \"disabledFrame\": 0, \"hoveredFrame\": 0",
-			name.c_str(), x, y, width, height);
-		out += head;
-		if (!click.empty()) {
-			out += std::string(", \"onClickMessage\": \"PanelManager:ClosePanel:") + kBookClick + book.id + click + "\"";
-		}
-		if (!tip.empty()) {
-			out += ", \"tooltipString\": \"" + JsonText(tip) + "\"";
-		}
-		out += " } },\n";
+		g_book->spot(g_page, name.c_str(), x, y, width, height, click.c_str(), tip.c_str());
 	}
-	// A button: the game's own button picture at this width with the text on it (lit under the
-	// cursor). Without the picture (it could not be read at start): a word to click, "[ Save ]".
 	void button(const std::string& click, int x, int y, int width, const std::string& text, const char* color = "$FontColorWhite") {
-		if (!HasButtonArt(width)) {
-			label("Do" + click, x, y, width, 44, color, "center", false, "[ " + text + " ]");
-			spot("Click" + click, x, y, width, 44, click, "");
-			return;
-		}
-		char head[500];
-		snprintf(head, sizeof(head),
-			"\t\t{ \"type\": \"ButtonWidget\", \"name\": \"Do%s\", \"fields\": { \"rect\": { \"x\": %d, \"y\": %d },"
-			" \"filename\": \"d2rloader\\\\live-cube-recipes\\\\button%d\", \"normalFrame\": 0, \"pressedFrame\": 1, \"disabledFrame\": 2, \"hoveredFrame\": 3,"
-			" \"textColor\": \"%s\", \"text/style\": \"$StyleFEButtonText\", \"pointSize\": \"$SmallFontSize\","
-			" \"onClickMessage\": \"PanelManager:ClosePanel:%s%s%s\", \"textString\": \"",
-			click.c_str(), x, y, width, color, kBookClick, book.id, click.c_str());
-		out += head + JsonText(text) + "\" } },\n";
+		g_book->button(g_page, click.c_str(), x, y, width, text.c_str(), color);
 	}
-	void arrow(const char* name, int x, const char* sprite) {
-		char text[500];
-		snprintf(text, sizeof(text),
-			"\t\t{ \"type\": \"ButtonWidget\", \"name\": \"%s\", \"fields\": { \"rect\": { \"x\": %d, \"y\": 1352 }, \"filename\": \"PANEL\\\\Stash\\\\%s\","
-			" \"normalFrame\": 0, \"hoveredFrame\": 1, \"pressedFrame\": 2, \"disabledFrame\": 3, \"onClickMessage\": \"PanelManager:ClosePanel:%s%s%s\" } },\n",
-			name, x, sprite, kBookClick, book.id, name);
-		out += text;
-	}
+	void slot(const char* name, int x, int y) { g_book->image(g_page, name, x, y, "PANEL\\Modals\\InputSlot"); }
 	// Where the list stands: a thin line down the right side with a mark on it.
-	void bar(int y, size_t top, size_t shown, size_t count) {
-		if (!g_barArt || count <= shown) {
-			return;
-		}
-		char text[500];
-		snprintf(text, sizeof(text),
-			"\t\t{ \"type\": \"ImageWidget\", \"name\": \"ScrollTrack\", \"fields\": { \"rect\": { \"x\": 1070, \"y\": %d }, \"filename\": \"d2rloader\\\\live-cube-recipes\\\\scrolltrack\" } },\n"
-			"\t\t{ \"type\": \"ImageWidget\", \"name\": \"ScrollMark\", \"fields\": { \"rect\": { \"x\": 1066, \"y\": %d }, \"filename\": \"d2rloader\\\\live-cube-recipes\\\\scrollmark\" } },\n",
-			y, y + static_cast<int>((kTrackHeight - kMarkHeight) * top / (count - shown)));
-		out += text;
-	}
-	void pager(bool before, bool after, const std::string& text) {
-		if (before) { // an arrow is there only when there is more that way
-			arrow("Previous", 300, "Stash_LeftArrow");
-		}
-		if (after) {
-			arrow("Next", 799, "Stash_RightArrow");
-		}
-		label("Page", 370, 1352, 422, 63, "$FontColorLightGold", "center", false, text);
-	}
-	std::string done() {
-		out.erase(out.size() - 2); // the last comma
-		return out + "\n\t]\n}\n";
-	}
+	void bar(int y, size_t top, size_t shown, size_t count) { g_book->bar(g_page, y, top, shown, count); }
+	void pager(bool before, bool after, const std::string& text) { g_book->pager(g_page, before ? 1 : 0, after ? 1 : 0, text.c_str()); }
+	std::string done() { return {}; }
 };
 
 // The list: a search slot, the entries of one page, the arrows; in the recipe book also the
@@ -1418,14 +1304,11 @@ std::string ListLayout(const Book& b, const std::string& panelName) {
 	const size_t rows = static_cast<size_t>(b.rows);
 	LayoutText   l(b, panelName);
 	l.title(b.heading);
-	l.out += "\t\t{ \"type\": \"ImageWidget\", \"name\": \"SearchSlot\", \"fields\": { \"rect\": { \"x\": 210, \"y\": 138 }, \"filename\": \"PANEL\\\\Modals\\\\InputSlot\" } },\n";
+	l.slot("SearchSlot", 210, 138);
 	l.label("Search", 250, 166, 660, 56, b.words.empty() ? "$FontColorGoldYellow" : "$FontColorWhite", "left", false,
 		b.words.empty() ? (b.legend && b.tab == 1 ? "Type: op 18, param, stat 370, plvl" : b.hint) : Fit(b.words, 34) + "_");
-	int top = 318;
-	if (b.legend) { // its two tabs; the one shown is white
-		l.button("Tab0", 82, 262, 480, "Words and codes", b.tab == 0 ? "$FontColorWhite" : "$FontColorGoldYellow");
-		l.button("Tab1", 592, 262, 480, "Columns and values", b.tab == 1 ? "$FontColorWhite" : "$FontColorGoldYellow");
-	} else {
+	int top = 268; // the legend: under the Mod Book's row of tabs (its two tabs are tabs there)
+	if (!b.legend) {
 		if (!g_editor.undo.empty()) { // beside the search slot
 			l.button("Undo", 86, 172, 116, "Undo");
 		}
@@ -1653,7 +1536,7 @@ std::string TemplateNameLayout(const Book& b, const std::string& panelName) {
 	l.title("New Template");
 	l.label("Ask", 82, 380, 990, 120, "$FontColorLightGold", "center", true,
 		"Type a name for the template (letters, digits, spaces, - and _).\nThe list in the book, " + std::to_string(e.rows.size()) + " recipes, is saved under it. A template of the same name is replaced.");
-	l.out += "\t\t{ \"type\": \"ImageWidget\", \"name\": \"NameSlot\", \"fields\": { \"rect\": { \"x\": 210, \"y\": 520 }, \"filename\": \"PANEL\\\\Modals\\\\InputSlot\" } },\n";
+	l.slot("NameSlot", 210, 520);
 	l.label("NameTyped", 250, 548, 660, 56, "$FontColorWhite", "left", false, e.templateName + "_");
 	l.button("NameDone", 231, 680, 330, "Save template", "$FontColorGreen");
 	l.button("NameCancel", 601, 680, 330, "Cancel");
@@ -1677,142 +1560,17 @@ std::string BookLayout(const Book& b, const std::string& panelName) {
 	}
 }
 
-const D2RL::ResourceService* g_resources = nullptr;
-
-// The game's own button picture ("PANEL\\Modals\\ModalButton"): the mod's copy when it has one, else the game's.
-bool ReadButtonSource(std::string& out, std::string& from) {
-	std::wstring root;
-	std::string  problem;
-	if (FindDataRoot(root, problem) && ReadWhole(root + L"\\hd\\global\\ui\\panel\\modals\\modalbutton.sprite", out) && !out.empty()) {
-		from = "the mod";
-		return true;
-	}
-	HANDLE storage = nullptr;
-	if (!CascOpenStorage(GameDirectory().c_str(), 0, &storage)) {
-		from = "the game's data could not be opened (error " + std::to_string(GetCascError()) + ")";
-		return false;
-	}
-	HANDLE file = nullptr;
-	bool   ok   = CascOpenFile(storage, "data:data\\hd\\global\\ui\\panel\\modals\\modalbutton.sprite", 0, CASC_OPEN_BY_NAME, &file);
-	if (ok) {
-		ULONGLONG size = 0;
-		ok             = CascGetFileSize64(file, &size) && size > 40 && size <= 64ULL * 1024 * 1024;
-		if (ok) {
-			out.resize(static_cast<size_t>(size));
-			DWORD read = 0;
-			ok         = CascReadFile(file, out.data(), static_cast<DWORD>(size), &read) && read == size;
-		}
-		CascCloseFile(file);
-	}
-	CascCloseStorage(storage);
-	from = ok ? "the game" : "the game's data has no such picture";
-	return ok;
-}
-
-// The scroll line and its mark: two plain pictures made here (half size for low resolution).
-void BarSetUp(const D2RL::ResourceService* resources) {
-	static std::vector<std::string> kept;
-	kept.reserve(4);
-	struct Picture {
-		const char* name;
-		int         width, height;
-		uint8_t     color[4];
-	};
-	const Picture pictures[] = { { "scrolltrack", 4, kTrackHeight, { 150, 120, 70, 120 } }, { "scrollmark", 12, kMarkHeight, { 222, 184, 110, 255 } } };
-	for (const Picture& picture : pictures) {
-		for (int low = 0; low < 2; ++low) {
-			const uint32_t width = static_cast<uint32_t>(picture.width / (low + 1)), height = static_cast<uint32_t>(picture.height / (low + 1));
-			std::string    bytes(40 + static_cast<size_t>(width) * height * 4, '\0');
-			const uint32_t head[10] = { 0x31417053u, 31u | width << 16, width, height, 0, 1, 0, 0, width * height * 4, 4 };
-			memcpy(bytes.data(), head, 40);
-			for (size_t at = 40; at < bytes.size(); at += 4) {
-				memcpy(bytes.data() + at, picture.color, 4);
-			}
-			kept.push_back(std::move(bytes));
-			const std::string path = std::string("data/hd/global/ui/d2rloader/live-cube-recipes/") + picture.name + (low != 0 ? ".lowend.sprite" : ".sprite");
-			D2RL::Resources::ResourceRegistration sprite {};
-			sprite.structSize = D2RL::Resources::ResourceRegistrationSize;
-			sprite.path       = path.c_str();
-			sprite.bytes      = reinterpret_cast<const uint8_t*>(kept.back().data());
-			sprite.byteCount  = kept.back().size();
-			D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
-			if (resources->registerResource(g_ctx, &sprite, &handle) != D2RL::Resources::Result::Success) {
-				LogF("the scroll line's picture could not be registered: lists are shown without it");
-				return;
-			}
-		}
-	}
-	g_barArt = true;
-}
-
-// Makes the buttons' pictures, one per width, and hands them to the loader. Without them the
-// buttons are words to click, as before 0.11.
-void ButtonSetUp(const D2RL::ResourceService* resources) {
-	const ULONGLONG started = GetTickCount64();
-	std::string     source, from;
-	if (!ReadButtonSource(source, from)) {
-		LogF("buttons: plain words, the game's button picture could not be read (%s)", from.c_str());
-		return;
-	}
-	static std::vector<std::string> kept; // the loader keeps pointers to these
-	kept.reserve(std::size(kButtonWidths) * 2);
-	for (const int width : kButtonWidths) {
-		bool ok = true;
-		for (int low = 0; low < 2 && ok; ++low) { // the low-resolution picture is half the size
-			kept.push_back(cube::ButtonSprite(source, low != 0 ? width / 2 : width, low != 0 ? 22 : 44));
-			const std::string path = "data/hd/global/ui/d2rloader/live-cube-recipes/button" + std::to_string(width) + (low != 0 ? ".lowend.sprite" : ".sprite");
-			D2RL::Resources::ResourceRegistration sprite {};
-			sprite.structSize = D2RL::Resources::ResourceRegistrationSize;
-			sprite.path       = path.c_str();
-			sprite.bytes      = reinterpret_cast<const uint8_t*>(kept.back().data());
-			sprite.byteCount  = kept.back().size();
-			D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
-			ok = !kept.back().empty() && resources->registerResource(g_ctx, &sprite, &handle) == D2RL::Resources::Result::Success;
-		}
-		if (!ok) {
-			LogF("buttons: plain words, the picture for width %d could not be made or registered", width);
-			g_buttonArt = false;
-			return;
-		}
-	}
-	g_buttonArt = true;
-	LogF("buttons: the game's button picture (from %s) in %zu widths, %llu ms", from.c_str(), std::size(kButtonWidths), static_cast<unsigned long long>(GetTickCount64() - started));
-}
-const D2RL::PanelService*    g_panels    = nullptr;
-const D2RL::WidgetService*   g_widgets   = nullptr;
-std::string                  g_bookOff = "not set up"; // why there are no books
-
 bool AnyBookOpen() {
 	return g_recipeBook.open.load() || g_legendBook.open.load();
 }
 
-bool SlotIsOpen(const BookSlot& slot) {
-	D2RL::Panels::PanelInfo info {};
-	info.structSize = D2RL::Panels::PanelInfoSize;
-	return g_panels->getPanelInfo(g_ctx, slot.panel, &info) == D2RL::Panels::Result::Success && info.presentationState == D2RL::Panels::PresentationState::Open;
-}
-
-// Is the book on screen? Also notices that the game closed it.
+// Is the book on screen (one of its tabs is the one its side shows)?
 bool BookIsOpen(Book& b) {
-	if (g_panels == nullptr || b.active < 0) {
-		return false;
+	bool on = false;
+	for (const int handle : b.handle) {
+		on = on || (g_book != nullptr && handle != 0 && g_book->isShown(handle) != 0);
 	}
-	if (SlotIsOpen(b.slots[b.active])) {
-		return true;
-	}
-	b.slots[b.active].closedAt = NowMs();
-	b.active                   = -1;
-	return false;
-}
-
-bool SlotRegister(BookSlot& slot, const std::string& layout) {
-	D2RL::Resources::ResourceRegistration resource {};
-	resource.structSize = D2RL::Resources::ResourceRegistrationSize;
-	resource.path       = slot.path.c_str();
-	resource.bytes      = layout.data();
-	resource.byteCount  = layout.size();
-	slot.layout         = D2RL::Resources::InvalidHandle;
-	return g_resources->registerResource(g_ctx, &resource, &slot.layout) == D2RL::Resources::Result::Success;
+	return on;
 }
 
 // ---- the editor's data
@@ -2048,8 +1806,8 @@ std::vector<cube::Cells> EditorMissing(bool deletedOnes) {
 
 enum class Shown { Yes, Later, No };
 
-// Shows the book's current page in the next free panel of its pool, then closes the one before.
-Shown BookShow(Book& b) {
+// What the book shows, read afresh when it changed. Called before a page is drawn.
+void BookRefresh(Book& b) {
 	if (b.stamp != g_bookStamp.load()) { // what the book shows changed (start, the recipes command, a save)
 		b.stamp = g_bookStamp.load();
 		if (b.legend) {
@@ -2073,54 +1831,13 @@ Shown BookShow(Book& b) {
 	if (b.top + rows > b.found.size()) {
 		b.top = b.found.size() > rows ? b.found.size() - rows : 0;
 	}
-	const uint64_t now    = NowMs();
-	int            target = -1;
-	for (int offset = 1; offset <= kBookSlots && target < 0; ++offset) {
-		const int       index = (b.cursor + offset) % kBookSlots;
-		const BookSlot& slot  = b.slots[index];
-		if (index != b.active && (!slot.loaded || (slot.closedAt != 0 && now - slot.closedAt >= kBookCooldown))) {
-			target = index;
-		}
+}
+
+// Has the Mod Book draw the book's page again.
+Shown BookShow(Book& b) {
+	if (g_book != nullptr) {
+		g_book->redraw(b.handle[b.legend ? b.tab : 0]);
 	}
-	if (target < 0) {
-		return Shown::Later; // every panel of the pool was used within the last 1.5 s
-	}
-	BookSlot& next = b.slots[target];
-	if (next.loaded) {
-		D2RL::Widgets::UiAction unload {};
-		unload.structSize = D2RL::Widgets::UiActionSize;
-		unload.target     = "PanelManager";
-		unload.command    = "UnloadPanel";
-		unload.text       = next.name.c_str();
-		if (const auto result = g_widgets->dispatchUiAction(g_ctx, &unload); result != D2RL::Widgets::Result::Success) {
-			LogF("%s: an old page could not be unloaded (result %u)", b.id, static_cast<unsigned>(result));
-			return Shown::No;
-		}
-		next.loaded = false;
-	}
-	if (next.layout != D2RL::Resources::InvalidHandle) {
-		static_cast<void>(g_resources->unregisterResource(g_ctx, next.layout));
-		next.layout = D2RL::Resources::InvalidHandle;
-	}
-	if (!SlotRegister(next, BookLayout(b, next.name))) {
-		LogF("%s: the page's layout could not be registered", b.id);
-		return Shown::No;
-	}
-	const D2RL::Panels::Result opened = g_panels->openPanel(g_ctx, next.panel);
-	if (opened != D2RL::Panels::Result::Success) {
-		LogF("%s: could not be opened (panel result %u; 5 = not found: the game did not accept the layout, 6 = busy, 3 = no UI to open it in)", b.id, static_cast<unsigned>(opened));
-		return Shown::No;
-	}
-	const int previous = b.active;
-	b.active           = target;
-	b.cursor           = target;
-	next.loaded        = true;
-	next.closedAt      = 0;
-	if (previous >= 0) {
-		static_cast<void>(g_panels->closePanel(g_ctx, b.slots[previous].panel));
-		b.slots[previous].closedAt = NowMs();
-	}
-	b.open.store(true);
 	return Shown::Yes;
 }
 
@@ -2130,13 +1847,9 @@ void BookAsk(D2RL::Threads::Callback job) {
 	}
 }
 
-void BookKeyboard(bool on);
-
 void BookClose(Book& b) {
-	if (b.active >= 0) {
-		static_cast<void>(g_panels->closePanel(g_ctx, b.slots[b.active].panel));
-		b.slots[b.active].closedAt = NowMs();
-		b.active                   = -1;
+	if (g_book != nullptr) {
+		g_book->close(b.right ? modbook::kRight : modbook::kLeft);
 	}
 	b.open.store(false);
 }
@@ -2690,7 +2403,7 @@ void __cdecl BookJob(const D2RL::PluginContext*, void*) noexcept {
 		b.keys.clear();
 		b.clicks.clear();
 		ReleaseSRWLockExclusive(&g_typeLock);
-		if (g_panels == nullptr || !BookIsOpen(b)) {
+		if (g_book == nullptr || !BookIsOpen(b)) {
 			b.open.store(false);
 			b.move.store(0);
 			b.jump.store(0);
@@ -2708,11 +2421,6 @@ void __cdecl BookJob(const D2RL::PluginContext*, void*) noexcept {
 				if (click == "Escape") {
 					BookClose(b);
 					closed = true;
-				} else if ((click == "Tab0" || click == "Tab1") && b.tab != click[3] - '0') {
-					b.tab   = click[3] - '0'; // the other tab: its entries, from the top, the search kept
-					b.stamp = ~0ull;
-					b.top  = 0;
-					dirty   = true;
 				} else if (click.rfind("Row", 0) == 0) {
 					const size_t at = b.top + static_cast<size_t>(atoi(click.c_str() + 3));
 					if (at < b.found.size() && LegendInsert(b, b.entries[b.found[at]].title)) {
@@ -2803,399 +2511,134 @@ void __cdecl BookJob(const D2RL::PluginContext*, void*) noexcept {
 		if (!dirty) {
 			continue; // nothing to show that is not shown (the hook thread asks four times a second)
 		}
-		if (BookShow(b) == Shown::Later) {
-			b.redo.store(true);
-			again = true; // the pool is cooling down: again on the next UI update
-		}
+		static_cast<void>(BookShow(b));
 	}
-	if (!AnyBookOpen()) {
-		BookKeyboard(false);
-	} else if (again) {
+	if (again) {
 		BookAsk(BookJob);
 	}
 }
 
-// Opens a book, or closes it when it is open (the recipe book asks first when changes are not saved).
-void BookToggle(Book& b) {
-	if (g_panels == nullptr) {
-		g_ctx->WriteConsoleMessage(("Live Cube Recipes: no panels - " + g_bookOff).c_str());
+// ---- the books as tabs of the Mod Book
+
+struct TabRef {
+	Book* book;
+	int   tab; // the legend's: 0 words and codes, 1 columns and values
+};
+TabRef g_tabRefs[] = { { &g_recipeBook, 0 }, { &g_legendBook, 0 }, { &g_legendBook, 1 } };
+
+void __cdecl TabDraw(void* user, modbook::Page* page) noexcept {
+	Book& b = *static_cast<TabRef*>(user)->book;
+	g_page  = page;
+	BookRefresh(b);
+	static_cast<void>(BookLayout(b, std::string()));
+	g_page = nullptr;
+}
+
+void __cdecl TabClick(void* user, const char* what) noexcept {
+	Book& b = *static_cast<TabRef*>(user)->book;
+	AcquireSRWLockExclusive(&g_typeLock);
+	b.clicks.emplace_back(what);
+	ReleaseSRWLockExclusive(&g_typeLock);
+	BookJob(g_ctx, nullptr);
+}
+
+void __cdecl TabKeys(void* user, const char* typed) noexcept {
+	Book& b = *static_cast<TabRef*>(user)->book;
+	AcquireSRWLockExclusive(&g_typeLock);
+	b.keys += typed;
+	ReleaseSRWLockExclusive(&g_typeLock);
+	BookJob(g_ctx, nullptr);
+}
+
+void __cdecl TabMove(void* user, int pages, int rows, int jump) noexcept {
+	Book& b = *static_cast<TabRef*>(user)->book;
+	b.move.fetch_add(pages);
+	b.scroll.fetch_add(rows);
+	if (jump != 0) {
+		b.jump.store(jump);
+	}
+	BookJob(g_ctx, nullptr);
+}
+
+// The tab came on screen, or left it (its side was closed, or another tab is shown).
+void __cdecl TabShown(void* user, int on) noexcept {
+	const TabRef& ref = *static_cast<TabRef*>(user);
+	Book&         b   = *ref.book;
+	if (on == 0) {
+		b.open.store(false);
 		return;
 	}
-	if (BookIsOpen(b)) {
-		if (!b.legend && g_editor.changes != 0 && g_editor.view != View::Prompt) {
-			g_editor.promptFrom       = g_editor.view;
-			g_editor.closeAfterPrompt = true;
-			g_editor.view             = View::Prompt;
-			static_cast<void>(BookShow(b));
-			return;
-		}
-		BookClose(b);
-		if (!AnyBookOpen()) {
-			BookKeyboard(false);
-		}
-		return;
+	if (b.legend && b.tab != ref.tab) { // the legend's other tab: its entries, from the top, the search kept
+		b.tab = ref.tab;
+		b.top = 0;
 	}
 	b.stamp = ~0ull; // read what it shows afresh
 	if (!b.legend && g_editor.view == View::Prompt) {
 		g_editor.view = View::List;
 	}
-	const Shown shown = BookShow(b);
-	if (shown == Shown::Yes) {
-		BookKeyboard(true);
-	} else {
-		g_ctx->WriteConsoleMessage(shown == Shown::Later ? "Live Cube Recipes: that panel was just closed; try again in a second."
-		                                                 : "Live Cube Recipes: the panel could not be opened (it needs a game in progress); the reason is in live-cube-recipes.log.");
-	}
-}
-void __cdecl RecipeBookToggle(const D2RL::PluginContext*, void*) noexcept {
-	BookToggle(g_recipeBook);
-}
-void __cdecl LegendToggle(const D2RL::PluginContext*, void*) noexcept {
-	BookToggle(g_legendBook);
+	b.open.store(true);
 }
 
-// The books' buttons: "close panel" messages for names that are no panels.
-D2RL::SharedEvents::UiMessageAction __cdecl OnBookMessage(const D2RL::PluginContext*, const D2RL::SharedEvents::UiMessageEvent* event, void*) noexcept {
-	if (event == nullptr || event->target == nullptr || event->command == nullptr || event->text == nullptr || strcmp(event->target, "PanelManager") != 0 || strcmp(event->command, "ClosePanel") != 0
-		|| strncmp(event->text, kBookClick, sizeof(kBookClick) - 1) != 0) {
-		return D2RL::SharedEvents::UiMessageAction::Continue;
+// Asked before the book is closed or another tab is shown: with changes not saved, the recipe
+// book shows its question instead.
+int __cdecl TabLeave(void* user) noexcept {
+	Book& b = *static_cast<TabRef*>(user)->book;
+	if (!b.legend && g_editor.changes != 0 && g_editor.view != View::Prompt) {
+		g_editor.promptFrom       = g_editor.view;
+		g_editor.closeAfterPrompt = true;
+		g_editor.view             = View::Prompt;
+		return 0;
 	}
-	const char* which = event->text + sizeof(kBookClick) - 1;
-	for (Book* book : g_books) {
-		const size_t length = strlen(book->id);
-		if (strncmp(which, book->id, length) == 0) {
-			AcquireSRWLockExclusive(&g_typeLock);
-			book->clicks.emplace_back(which + length);
-			ReleaseSRWLockExclusive(&g_typeLock);
-		}
-	}
-	BookAsk(BookJob);
-	return D2RL::SharedEvents::UiMessageAction::Consume;
+	return 1;
 }
 
-// ---- keys and the wheel while a book is open
-
-std::atomic<int> g_bookSide { -1 }; // test/fake_host.cpp: 0 recipes, 1 legend; -1 = by the cursor
-
-// The book keys and the wheel go to: the open one; with both open, the one the cursor is over.
-Book* TargetBook() {
-	const bool recipes = g_recipeBook.open.load(), legend = g_legendBook.open.load();
-	if (!recipes || !legend) {
-		return recipes ? &g_recipeBook : legend ? &g_legendBook : nullptr;
-	}
-	if (const int side = g_bookSide.load(); side >= 0) {
-		return g_books[side];
-	}
-	POINT      cursor {};
-	RECT       window {};
-	const HWND front = GetForegroundWindow();
-	if (front != nullptr && GetCursorPos(&cursor) && GetWindowRect(front, &window) && window.right > window.left) {
-		return cursor.x >= (window.left + window.right) / 2 ? &g_legendBook : &g_recipeBook;
-	}
-	return &g_recipeBook;
-}
-
-void BookPush(Book& book, char key) {
-	AcquireSRWLockExclusive(&g_typeLock);
-	if (book.keys.size() < 4096) {
-		book.keys += key;
-	}
-	ReleaseSRWLockExclusive(&g_typeLock);
-}
-
-// The letter a key gives on a plain US layout, when the system cannot say (and for the tests).
-char PlainChar(unsigned key, bool shift) {
-	if (key >= 'A' && key <= 'Z') {
-		return static_cast<char>(shift ? key : key + 32);
-	}
-	if (key >= '0' && key <= '9') {
-		return shift ? ")!@#$%^&*("[key - '0'] : static_cast<char>(key);
-	}
-	if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9) {
-		return static_cast<char>('0' + (key - VK_NUMPAD0));
-	}
-	switch (key) {
-	case VK_SPACE: return ' ';
-	case VK_OEM_COMMA: return shift ? '<' : ',';
-	case VK_OEM_PERIOD: return shift ? '>' : '.';
-	case VK_DECIMAL: return '.';
-	case VK_OEM_MINUS: return shift ? '_' : '-';
-	case VK_SUBTRACT: return '-';
-	case VK_OEM_PLUS: return shift ? '+' : '=';
-	case VK_ADD: return '+';
-	case VK_MULTIPLY: return '*';
-	case VK_DIVIDE: return '/';
-	case VK_OEM_7: return shift ? '"' : '\'';
-	case VK_OEM_1: return shift ? ':' : ';';
-	case VK_OEM_2: return shift ? '?' : '/';
-	case VK_OEM_4: return shift ? '{' : '[';
-	case VK_OEM_6: return shift ? '}' : ']';
-	case VK_OEM_5: return shift ? '|' : '\\';
-	default: return 0;
-	}
-}
-
-// A key went down while a book is open; `typed` is its letter (0: not a letter).
-// True: it was the book's (the game must not see it).
-bool BookKey(unsigned key, char typed, bool shift = false, bool control = false) {
-	Book* book = TargetBook();
-	if (book == nullptr) {
-		return false;
-	}
-	if (control) { // Ctrl+S save, Ctrl+N new recipe, Ctrl+V paste, Ctrl+C copy the cell, Ctrl+Z undo, Ctrl+Y redo; every other Ctrl key is the game's
-		const char command = key == 'S' ? kKeySave : key == 'N' ? kKeyNew : key == 'V' ? kKeyPaste : key == 'C' ? kKeyCopy : key == 'Z' ? kKeyUndo : key == 'Y' ? kKeyRedo : 0;
-		if (command == 0) {
-			return false;
-		}
-		BookPush(*book, command);
-	} else if (key == VK_ESCAPE) {
-		AcquireSRWLockExclusive(&g_typeLock);
-		book->clicks.emplace_back("Escape");
-		ReleaseSRWLockExclusive(&g_typeLock);
-	} else if (typed != 0) {
-		BookPush(*book, typed);
-	} else if (key == VK_BACK) {
-		BookPush(*book, '\b');
-	} else if (key == VK_DELETE) {
-		BookPush(*book, '\x7f');
-	} else if (key == VK_TAB) {
-		BookPush(*book, shift ? kKeyBack : '\t');
-	} else if (key == VK_RETURN) {
-		BookPush(*book, kKeyEnter);
-	} else if (key == VK_UP || key == VK_DOWN) {
-		BookPush(*book, key == VK_UP ? kKeyUp : kKeyDown);
-	} else if (key == VK_PRIOR) {
-		book->move.fetch_sub(1);
-	} else if (key == VK_NEXT) {
-		book->move.fetch_add(1);
-	} else if (key == VK_HOME || key == VK_END) {
-		book->jump.store(key == VK_HOME ? -1 : 1);
-	} else {
-		return false; // not the book's: F keys, left and right ...
-	}
-	BookAsk(BookJob);
-	return true;
-}
-
-void BookWheel(int notches) {
-	if (Book* book = TargetBook(); book != nullptr && notches != 0) {
-		book->scroll.fetch_add(notches > 0 ? -kWheelRows : kWheelRows); // wheel up: the entries before
-		BookAsk(BookJob);
-	}
-}
-
-HHOOK             g_keyHook = nullptr, g_mouseHook = nullptr;
-std::atomic<bool> g_hooksWanted { false };
-HANDLE            g_hookThread = nullptr;
-bool              g_keyHeld[256] = {}; // key downs a book took: their key ups are taken too
-
-bool GameIsInFront() {
-	const HWND front   = GetForegroundWindow();
-	DWORD      process = 0;
-	return front != nullptr && GetWindowThreadProcessId(front, &process) != 0 && process == GetCurrentProcessId();
-}
-
-LRESULT CALLBACK BookKeyProc(int code, WPARAM message, LPARAM parameter) {
-	const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(parameter);
-	if (code < 0 || key == nullptr || key->vkCode > 0xff || (message != WM_KEYDOWN && message != WM_KEYUP)) {
-		return CallNextHookEx(g_keyHook, code, message, parameter);
-	}
-	if (message == WM_KEYUP) {
-		if (g_keyHeld[key->vkCode]) {
-			g_keyHeld[key->vkCode] = false;
-			return 1;
-		}
-		return CallNextHookEx(g_keyHook, code, message, parameter);
-	}
-	// Alt combinations stay the game's; so do Ctrl combinations but the book's four (BookKey)
-	if (!AnyBookOpen() || !GameIsInFront() || (key->flags & LLKHF_ALTDOWN) != 0) {
-		return CallNextHookEx(g_keyHook, code, message, parameter);
-	}
-	if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) {
-		if (BookKey(key->vkCode, 0, false, true)) {
-			g_keyHeld[key->vkCode] = true;
-			return 1;
-		}
-		return CallNextHookEx(g_keyHook, code, message, parameter);
-	}
-	// the key's letter by the keyboard layout in use (Shift and Caps Lock as they are now)
-	const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-	BYTE       state[256] = {};
-	state[VK_SHIFT]   = shift ? 0x80 : 0;
-	state[VK_CAPITAL] = (GetKeyState(VK_CAPITAL) & 1) != 0 ? 1 : 0;
-	wchar_t   letters[4] = {};
-	const int count      = ToUnicodeEx(key->vkCode, key->scanCode, state, letters, 4, 0, GetKeyboardLayout(0));
-	char      typed      = count == 1 && letters[0] >= 0x20 && letters[0] < 0x7f ? static_cast<char>(letters[0]) : 0;
-	if (typed == 0 && count <= 0) {
-		typed = PlainChar(key->vkCode, shift);
-	}
-	if (BookKey(key->vkCode, typed, shift)) {
-		g_keyHeld[key->vkCode] = true;
-		return 1;
-	}
-	return CallNextHookEx(g_keyHook, code, message, parameter);
-}
-
-LRESULT CALLBACK BookMouseProc(int code, WPARAM message, LPARAM parameter) {
-	const auto* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(parameter);
-	if (code >= 0 && mouse != nullptr && message == WM_MOUSEWHEEL && AnyBookOpen() && GameIsInFront()) {
-		BookWheel(static_cast<short>(HIWORD(mouse->mouseData)));
-		return 1;
-	}
-	return CallNextHookEx(g_mouseHook, code, message, parameter);
-}
-
-// The hooks live on a thread of their own (a low-level hook is called on the thread that set
-// it, which must be reading messages), and only while a book is open.
-DWORD WINAPI BookHookThread(void*) {
-	HMODULE self = nullptr;
-	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&BookKeyProc), &self);
-	g_keyHook   = SetWindowsHookExW(WH_KEYBOARD_LL, BookKeyProc, self, 0);
-	g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, BookMouseProc, self, 0);
-	if (g_keyHook == nullptr) {
-		LogF("panels: the keyboard could not be taken (error %lu): typing may set off the game's hotkeys", GetLastError());
-	}
-	const UINT_PTR timer = SetTimer(nullptr, 0, 250, nullptr);
-	MSG            message {};
-	while (g_hooksWanted.load() && GetMessageW(&message, nullptr, 0, 0) > 0) {
-		if (message.message == WM_TIMER && AnyBookOpen()) {
-			BookAsk(BookJob); // notices a book the game closed by itself
-		}
-	}
-	KillTimer(nullptr, timer);
-	if (g_keyHook != nullptr) {
-		UnhookWindowsHookEx(g_keyHook);
-	}
-	if (g_mouseHook != nullptr) {
-		UnhookWindowsHookEx(g_mouseHook);
-	}
-	g_keyHook = g_mouseHook = nullptr;
-	memset(g_keyHeld, 0, sizeof(g_keyHeld));
-	return 0;
-}
-
-// Takes the keyboard and wheel for the books, or gives them back. UI thread.
-void BookKeyboard(bool on) {
-	if (on == g_hooksWanted.load()) {
+void BookToggle(Book& b) {
+	BookSetUp();
+	if (g_book == nullptr) {
+		g_ctx->WriteConsoleMessage(("Live Cube Recipes: no panels - " + g_bookOff).c_str());
 		return;
 	}
-	g_hooksWanted.store(on);
-	if (on) {
-		if (g_hookThread != nullptr) { // the last one is on its way out
-			WaitForSingleObject(g_hookThread, 1000);
-			CloseHandle(g_hookThread);
-		}
-		g_hookThread = CreateThread(nullptr, 0, BookHookThread, nullptr, 0, nullptr);
-	} else if (g_hookThread != nullptr) {
-		PostThreadMessageW(GetThreadId(g_hookThread), WM_NULL, 0, 0); // wakes it; it sees it is not wanted
-	}
-}
-
-D2RL::Input::ActionResult __cdecl OnBookAction(const D2RL::PluginContext*, const D2RL::Input::ActionEvent* event, void* which) noexcept {
-	if (event != nullptr && event->kind == D2RL::Input::ActionEventKind::Pressed) {
-		BookAsk(which == &g_legendBook ? LegendToggle : RecipeBookToggle);
-	}
-	return D2RL::Input::ActionResult::Handled;
+	g_book->toggle(b.handle[b.legend ? b.tab : 0]);
 }
 
 D2RL::ConsoleCommandResult __cdecl OnBookConsole(D2R::Game::Client*, const D2RL::ConsoleCommandContext*, void* which) noexcept {
-	BookAsk(which == &g_legendBook ? LegendToggle : RecipeBookToggle);
+	BookToggle(*static_cast<Book*>(which));
 	return D2RL::ConsoleCommandResult::Handled;
 }
 
-// At plugin start: the pools of panels with their layouts, the arrows' messages, the keys.
+// Puts the books into the Mod Book plugin as tabs: the recipes on the left, the legend's two
+// lists on the right. Done when the game has read its tables (every plugin is loaded by then).
 void BookSetUp() {
-	const D2RL::ResourceService*    resources = nullptr;
-	const D2RL::PanelService*       panels    = nullptr;
-	const D2RL::WidgetService*      widgets   = nullptr;
-	const D2RL::SharedEventService* events    = nullptr;
-	// which of the loader's services answer, and how much of each this loader has (for the log)
-	const auto r1 = g_ctx->QueryService(&resources);
-	const auto r2 = g_ctx->QueryService(&panels);
-	const auto r3 = g_ctx->QueryService(&widgets);
-	const auto r4 = g_ctx->QueryService(&events);
-	char       seen[300];
-	snprintf(seen, sizeof(seen), "resource service: answer %u, size %u (needs %u); panel: %u, %u (%u); widget: %u, %u (%u); UI message: %u, %u (%u)", static_cast<unsigned>(r1),
-		resources != nullptr ? resources->serviceSize : 0, D2RL::ResourceServiceRequiredSize, static_cast<unsigned>(r2), panels != nullptr ? panels->serviceSize : 0, D2RL::PanelServiceClosePanelFieldEnd,
-		static_cast<unsigned>(r3), widgets != nullptr ? widgets->serviceSize : 0, D2RL::WidgetServiceRequiredSize, static_cast<unsigned>(r4), events != nullptr ? events->serviceSize : 0,
-		D2RL::SharedEventServiceRequiredSize);
-	if (!D2RL::HasResourceServiceField(resources, D2RL::ResourceServiceRequiredSize) || !D2RL::HasPanelServiceField(panels, D2RL::PanelServiceClosePanelFieldEnd)
-		|| !D2RL::HasWidgetServiceField(widgets, D2RL::WidgetServiceRequiredSize) || !D2RL::HasSharedEventServiceField(events, D2RL::SharedEventServiceRequiredSize)) {
-		g_bookOff = std::string("the loader did not give the plugin a service the panels need (") + seen + "; answer 0 = given)";
+	static SRWLOCK once = SRWLOCK_INIT;
+	AcquireSRWLockExclusive(&once);
+	const struct Release {
+		~Release() { ReleaseSRWLockExclusive(&once); }
+	} release;
+	if (g_book != nullptr) {
 		return;
 	}
-	g_resources = resources;
-	{
-		// a 1 x 1 see-through picture for the hover buttons (the header MapSense's blank sprite has)
-		static uint8_t blank[44] = { 'S', 'p', 'A', '1', 31, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1 };
-		for (const char* path : { "data/hd/global/ui/d2rloader/live-cube-recipes/blank.sprite", "data/hd/global/ui/d2rloader/live-cube-recipes/blank.lowend.sprite" }) {
-			D2RL::Resources::ResourceRegistration sprite {};
-			sprite.structSize = D2RL::Resources::ResourceRegistrationSize;
-			sprite.path       = path;
-			sprite.bytes      = blank;
-			sprite.byteCount  = sizeof(blank);
-			D2RL::Resources::RegistrationHandle handle = D2RL::Resources::InvalidHandle;
-			if (const auto result = resources->registerResource(g_ctx, &sprite, &handle); result != D2RL::Resources::Result::Success) {
-				g_bookOff = "the hover picture could not be registered (result " + std::to_string(static_cast<unsigned>(result)) + ")";
-				return;
-			}
-		}
-	}
-	ButtonSetUp(resources);
-	BarSetUp(resources);
-	for (Book* book : g_books) {
-		for (int i = 0; i < kBookSlots; ++i) {
-			BookSlot& slot = book->slots[i];
-			char      id[40];
-			snprintf(id, sizeof(id), "%s%02d", book->id, i);
-			slot.name = std::string("live-cube-recipes/") + id;
-			slot.path = std::string("data/global/ui/layouts/live-cube-recipes/") + id + "hd.json";
-			if (!SlotRegister(slot, BookLayout(*book, slot.name))) {
-				g_bookOff = "a panel's layout could not be registered";
-				return;
-			}
-			D2RL::Panels::PanelRegistration registration {};
-			registration.structSize = D2RL::Panels::PanelRegistrationSize;
-			registration.flags      = D2RL::Panels::PanelFlags::CloseOnEscape;
-			registration.localId    = id;
-			if (const auto result = panels->registerPanel(g_ctx, &registration, &slot.panel); result != D2RL::Panels::Result::Success) {
-				g_bookOff = "a panel could not be registered (result " + std::to_string(static_cast<unsigned>(result)) + ")";
-				return;
-			}
-		}
-	}
-	D2RL::SharedEvents::UiMessageListener listener {};
-	listener.structSize = D2RL::SharedEvents::UiMessageListenerSize;
-	listener.callback   = OnBookMessage;
-	D2RL::SharedEvents::ListenerHandle listenerHandle = 0;
-	if (const auto result = events->registerUiMessageListener(g_ctx, &listener, &listenerHandle); result != D2RL::SharedEvents::Result::Success) {
-		g_bookOff = "the panels' buttons could not be listened to (result " + std::to_string(static_cast<unsigned>(result)) + ")";
+	g_book = modbook::Find();
+	if (g_book == nullptr) {
+		g_bookOff = "the Mod Book plugin (d2rl-mod-book.dll) is not installed; recipes still work through recipes.txt and the recipes command";
 		return;
 	}
-	g_widgets = widgets;
-	g_panels  = panels;
+	const char* const ids[]    = { "recipes", "legendwords", "legendcolumns" };
+	const char* const titles[] = { "Cube Recipes", "Recipe Words", "Recipe Terms" };
+	const char* const groups[] = { nullptr, "Cube Recipes", "General" }; // the right side's groups; the left side has none
+	bool              ok       = true;
+	for (int i = 0; i < 3; ++i) {
+		const modbook::Tab tab { sizeof(modbook::Tab), i == 0 ? modbook::kLeft : modbook::kRight, ids[i], titles[i], &g_tabRefs[i], TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, groups[i] };
+		const int          handle = g_book->addTab(&tab);
+		g_tabRefs[i].book->handle[g_tabRefs[i].tab] = handle;
+		ok                                           = ok && handle != 0;
+	}
+	if (!ok) {
+		g_bookOff = "the Mod Book did not take the tabs (see mod-book.log)";
+		g_book    = nullptr;
+		return;
+	}
 	g_bookOff.clear();
-
-	const D2RL::InputService* input = nullptr;
-	std::string               keys  = "no keys (this D2RLoader has no input service)";
-	if (g_ctx->QueryService(&input) == D2RL::ServiceQueryResult::Success && D2RL::HasInputServiceField(input, D2RL::InputServiceRequiredSize)) {
-		const auto add = [&](const char* id, const char* name, D2RL::Input::Key key, Book* book) {
-			D2RL::Input::ActionRegistration action {};
-			action.structSize       = D2RL::Input::ActionRegistrationSize;
-			action.logicalId        = id;
-			action.displayName      = name;
-			action.category         = "Live Cube Recipes";
-			action.defaultPrimary   = { key, D2RL::Input::Modifier::Control };
-			action.defaultSecondary = { D2RL::Input::Key::None, D2RL::Input::Modifier::None };
-			action.callback         = OnBookAction;
-			action.userData         = book;
-			D2RL::Input::ActionHandle handle = D2RL::Input::InvalidHandle;
-			return input->registerAction(g_ctx, &action, &handle) == D2RL::Input::Result::Success;
-		};
-		const bool first = add("recipe-book", "Cube Recipe Book", D2RL::Input::Key::B, &g_recipeBook), second = add("recipe-legend", "Cube Recipe Legend", D2RL::Input::Key::L, &g_legendBook);
-		keys = std::string(first ? "Ctrl+B recipe book" : "recipe book key not registered") + ", " + (second ? "Ctrl+L legend" : "legend key not registered") + " (unless changed in the game's key settings)";
-	}
-	LogF("panels: ready - console commands recipebook and recipelegend; %s (%s)", keys.c_str(), seen);
+	LogF("panels: the recipe book and the legend are tabs of the Mod Book (Ctrl+B, Ctrl+L; console commands recipebook and recipelegend)");
 }
 
 // ---------------------------------------------------------------- console
@@ -3250,19 +2693,6 @@ constexpr D2RL::PluginInfo kPluginInfo {
 
 } // namespace
 
-// What the keyboard and mouse hooks do with a key or the wheel while the book is open. Exported
-// for test/fake_host.cpp, which has no keyboard to press.
-D2RL_PLUGIN_EXPORT bool LiveCubeRecipesBookKey(unsigned key, int shift) noexcept {
-	return BookKey(key, (shift & 2) != 0 ? 0 : PlainChar(key, (shift & 1) != 0), (shift & 1) != 0, (shift & 2) != 0); // bit 0 Shift, bit 1 Ctrl
-}
-D2RL_PLUGIN_EXPORT void LiveCubeRecipesBookWheel(int notches) noexcept {
-	BookWheel(notches);
-}
-// Which book the cursor is over, for the test host: 0 recipes, 1 legend, -1 ask the real cursor.
-D2RL_PLUGIN_EXPORT void LiveCubeRecipesBookSide(int side) noexcept {
-	g_bookSide.store(side);
-}
-
 D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginInfo* {
 	return &kPluginInfo;
 }
@@ -3297,12 +2727,9 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 		D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
 		static_cast<void>(lifecycle->registerDataTablesLoadedListener(context, &tables, &handle));
 	}
-	BookSetUp();
+	BookSetUp(); // the Mod Book may load after this plugin: tried again when the tables are read
 	static_cast<void>(context->RegisterConsoleCommand("recipebook", OnBookConsole, "Live Cube Recipes: open or close the recipe book (every recipe the cube has; type to search)", &g_recipeBook));
 	static_cast<void>(context->RegisterConsoleCommand("recipelegend", OnBookConsole, "Live Cube Recipes: open or close the legend (what the words and codes in recipes mean; type to search)", &g_legendBook));
-	if (!g_bookOff.empty()) {
-		LogF("panels: not available - %s", g_bookOff.c_str());
-	}
 	// stay loaded: the game's recipe vector may point into memory this plugin fills
 	HMODULE self = nullptr;
 	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&Job), &self);
@@ -3314,10 +2741,5 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
 	g_recipeBook.open.store(false);
 	g_legendBook.open.store(false);
-	g_hooksWanted.store(false);
-	if (g_hookThread != nullptr) { // the keyboard goes back to the game
-		PostThreadMessageW(GetThreadId(g_hookThread), WM_NULL, 0, 0);
-		WaitForSingleObject(g_hookThread, 2000);
-	}
 	// The game's list stays as it is: the memory it is in is never freed.
 }

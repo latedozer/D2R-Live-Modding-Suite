@@ -14,6 +14,29 @@
 !/Live Cube Recipes Mod/*.md
 !/Live Cube Recipes Mod/test/
 
+# Live Properties plugin: own source, scripts, tests only.
+!/Live Properties Mod/
+/Live Properties Mod/*
+!/Live Properties Mod/*.cpp
+!/Live Properties Mod/*.h
+!/Live Properties Mod/*.sh
+!/Live Properties Mod/*.rc
+!/Live Properties Mod/*.toml
+!/Live Properties Mod/*.md
+!/Live Properties Mod/*.py
+!/Live Properties Mod/test/
+
+# Mod Book plugin (the shared panels): own source, scripts, tests only.
+!/Mod Book/
+/Mod Book/*
+!/Mod Book/*.cpp
+!/Mod Book/*.h
+!/Mod Book/*.sh
+!/Mod Book/*.rc
+!/Mod Book/*.toml
+!/Mod Book/*.md
+!/Mod Book/test/
+
 # CascLib (MIT) and the code it bundles, with every license text.
 # See Live Cube Recipes Mod/THIRD_PARTY_NOTICES.md.
 !/Live Cube Recipes Mod/third_party/
@@ -46,3 +69,18 @@
 *.log
 *.out
 __pycache__/
+
+# Save Scan plugin: own source, scripts, tests only. build/ holds COPIES OF SAVES: never commit it.
+!/Save Scan/
+/Save Scan/*
+!/Save Scan/*.cpp
+!/Save Scan/*.h
+!/Save Scan/*.sh
+!/Save Scan/*.rc
+!/Save Scan/*.toml
+!/Save Scan/*.md
+!/Save Scan/test/
+/Save Scan/test/*
+!/Save Scan/test/*.cpp
+!/Save Scan/test/*.py
+!/Save Scan/test/*.sh

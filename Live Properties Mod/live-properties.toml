@@ -1,0 +1,8 @@
+# Live Properties (proof of concept): item properties of the kind "N% of stat A is added to
+# stat B", made and changed while a game runs. Console (Ctrl + `): type prop
+# The properties are kept in d2rloader\live-properties\<mod>\properties.txt.
+# Close the game before editing this file; changes apply on the next start.
+
+# false = the plugin does nothing. Items that carry a live property's stat then CANNOT be read
+# by the game (their stat rows are empty again), so take those items off the characters first.
+enabled = true
