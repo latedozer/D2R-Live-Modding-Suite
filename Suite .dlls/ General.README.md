@@ -57,8 +57,10 @@ starts. To remove one, delete its DLL; its files stay.
   (stats, properties, cube recipes and more). Live Properties works on what the game read, those
   copies included. A **new stat** is made in one of the empty stat rows Exalted Items leaves in its
   stat table, so making stats needs Exalted Items; everything else works without it.
-- A mod exported **with** Exalted Items' copies already holds Exalted Items' rows: play it with the
-  Exalted Items plugin switched off. The "plain" export leaves them out.
+- A mod exported **with** Exalted Items' copies already holds Exalted Items' rows. Keep the Exalted
+  Items plugin **on**: version 1.1.0 or later sees that and uses the exported tables as they are,
+  adding only its game hooks (an older version would add its rows a second time). The "plain"
+  export leaves Exalted Items' table copies out.
 - Live Cube Recipes reads the mod's cube recipes and the copies other plugins keep, so recipes from
   your mod and from Exalted Items both show up.
 - If the game is updated to another build, the plugins that depend on it switch themselves off

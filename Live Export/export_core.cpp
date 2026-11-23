@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 namespace exporter {
 
@@ -352,6 +353,140 @@ bool ApplyCube(Tsv& cube, const Tsv& recipes, Report& report, const char* which)
 	return true;
 }
 
+// ---------------------------------------------------------------- Exalted Items' rows
+
+bool IsExalted(const std::string& description) {
+	return description.compare(0, 6, "[xlt] ") == 0;
+}
+
+static std::string K(const std::string& cell) {
+	size_t from = cell.find_first_not_of(" \t"), to = cell.find_last_not_of(" \t");
+	std::string k = from == std::string::npos ? std::string() : cell.substr(from, to - from + 1);
+	if (k.size() >= 2 && k.front() == '"' && k.back() == '"') {
+		k = k.substr(1, k.size() - 2);
+	}
+	for (char& c : k) {
+		c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+	}
+	return k;
+}
+
+std::string ExaltedKey(const std::string& output, const std::string& input1) {
+	const std::string out = K(output), in = K(input1), code = in.substr(0, in.find(','));
+	if (out.find("exc") != std::string::npos) {
+		return "upgrade:" + in;
+	}
+	return (out.find("eli") != std::string::npos ? "downgrade:" : "restore:") + code;
+}
+
+void LeaveOutExaltedRows(Edits& edits, Report& report) {
+	std::vector<StatEdit> stats;
+	for (const StatEdit& s : edits.stats) {
+		const bool filler = s.was.empty() || s.was.rfind("xlt_unused_", 0) == 0;
+		if (s.was.rfind("xlt_", 0) == 0 && !filler) {
+			report.problems.push_back("itemstatcost: stat " + std::to_string(s.id) + " " + s.was + ": not carried, Exalted Items makes this row");
+		} else if (filler && s.id > 486) {
+			report.problems.push_back("itemstatcost: made stat " + std::to_string(s.id) + ": not carried, Exalted Items' own stats start at 487");
+		} else {
+			stats.push_back(s);
+		}
+	}
+	edits.stats = stats;
+	std::vector<PropEdit> props;
+	for (const PropEdit& p : edits.props) {
+		if (p.code.rfind("xlt-", 0) == 0) {
+			report.problems.push_back("properties: " + p.code + ": not carried, Exalted Items makes this row");
+		} else {
+			props.push_back(p);
+		}
+	}
+	edits.props = props;
+}
+
+// The cells of a row of `t` at the cube table's columns, joined (to compare whole rows).
+static std::string RowKey(const Tsv& t, size_t r, const std::vector<std::string>& columns) {
+	std::string k;
+	for (const std::string& c : columns) {
+		const int at = t.Column(c);
+		k += (at >= 0 && static_cast<size_t>(at) < t.rows[r].size() ? t.rows[r][static_cast<size_t>(at)] : "") + "\t";
+	}
+	return k;
+}
+static std::string Get(const Tsv& t, size_t r, const char* column) {
+	const int at = t.Column(column);
+	return at >= 0 && static_cast<size_t>(at) < t.rows[r].size() ? t.rows[r][static_cast<size_t>(at)] : "";
+}
+
+bool ApplyCubePlain(Tsv& cube, const Tsv& recipes, const Tsv& madeAgainst, Report& report, const char* which) {
+	if (recipes.rows.empty()) {
+		return false;
+	}
+	std::vector<std::string> columns;
+	for (const std::string& h : madeAgainst.headers) {
+		if (!h.empty() && h[0] != '*') {
+			columns.push_back(h);
+		}
+	}
+	std::multiset<std::string> before;
+	for (size_t r = 0; r < madeAgainst.rows.size(); ++r) {
+		before.insert(RowKey(madeAgainst, r, columns));
+	}
+	Tsv kept;
+	kept.headers = recipes.headers;
+	std::set<std::string> keys; // the Exalted Items keys the plain mod brings
+	size_t changed = 0, untouched = 0, removed = 0;
+	for (size_t r = 0; r < recipes.rows.size(); ++r) {
+		if (!IsExalted(Get(recipes, r, "description"))) {
+			kept.rows.push_back(recipes.rows[r]);
+			continue;
+		}
+		const auto same = before.find(RowKey(recipes, r, columns));
+		if (same != before.end()) {
+			before.erase(same); // Exalted Items makes it again: left out
+			++untouched;
+		} else {
+			kept.rows.push_back(recipes.rows[r]);
+			keys.insert(ExaltedKey(Get(recipes, r, "output"), Get(recipes, r, "input 1")));
+			++changed;
+		}
+	}
+	// the Exalted Items rows the user took out: written with enabled 0, unless a changed one stands for them
+	std::multiset<std::string> inList;
+	for (size_t r = 0; r < recipes.rows.size(); ++r) {
+		inList.insert(RowKey(recipes, r, columns));
+	}
+	for (size_t r = 0; r < madeAgainst.rows.size(); ++r) {
+		if (!IsExalted(Get(madeAgainst, r, "description"))) {
+			continue;
+		}
+		const auto there = inList.find(RowKey(madeAgainst, r, columns));
+		if (there != inList.end()) {
+			inList.erase(there);
+			continue;
+		}
+		const std::string key = ExaltedKey(Get(madeAgainst, r, "output"), Get(madeAgainst, r, "input 1"));
+		if (keys.count(key) != 0) {
+			continue;
+		}
+		std::vector<std::string> row(recipes.headers.size());
+		for (size_t c = 0; c < recipes.headers.size(); ++c) {
+			const int from = madeAgainst.Column(recipes.headers[c]);
+			row[c]         = from >= 0 && static_cast<size_t>(from) < madeAgainst.rows[r].size() ? madeAgainst.rows[r][static_cast<size_t>(from)] : "";
+		}
+		const int enabled = recipes.Column("enabled");
+		if (enabled >= 0) {
+			row[static_cast<size_t>(enabled)] = "0";
+		}
+		kept.rows.push_back(row);
+		keys.insert(key);
+		++removed;
+	}
+	ApplyCube(cube, kept, report, which);
+	report.done.push_back(std::string(which) + ": Exalted Items' recipes: " + std::to_string(changed) + " changed by you kept, " + std::to_string(removed) + " removed by you (written with enabled 0), "
+	                      + std::to_string(untouched) + " left to Exalted Items");
+	return true;
+}
+
 // ---------------------------------------------------------------- strings files
 
 static std::string Json(const std::string& text) {
@@ -696,7 +831,40 @@ std::string D2rmmTs(const Edits& edits, const Tsv& baseCube, const Tsv& baseCube
 		std::vector<std::vector<std::string>> added, removed;
 		if (!list.rows.empty() && !base.headers.empty()) {
 			CubeDiff(base, list, columns, added, removed);
-			report.done.push_back(std::string(b == 0 ? "cubemain" : "base/cubemain") + ": " + std::to_string(added.size()) + " recipes in, " + std::to_string(removed.size()) + " out");
+			// Exalted Items' rows are never in D2RMM's tables (it adds them at game start): a changed
+			// one goes in whole and replaces Exalted Items' own; a removed one goes in with enabled 0.
+			size_t at[4] = { columns.size(), columns.size(), columns.size(), columns.size() }; // description, enabled, output, input 1
+			for (size_t c = 0; c < columns.size(); ++c) {
+				const char* names[] = { "description", "enabled", "output", "input 1" };
+				for (int n = 0; n < 4; ++n) {
+					at[n] = columns[c] == names[n] ? c : at[n];
+				}
+			}
+			const auto cell = [&](const std::vector<std::string>& row, int n) { return at[n] < row.size() ? row[at[n]] : std::string(); };
+			std::set<std::string> keys;
+			size_t                changed = 0, gone = 0;
+			for (const auto& row : added) {
+				if (IsExalted(cell(row, 0))) {
+					keys.insert(ExaltedKey(cell(row, 2), cell(row, 3)));
+					++changed;
+				}
+			}
+			std::vector<std::vector<std::string>> kept;
+			for (auto row : removed) {
+				if (!IsExalted(cell(row, 0))) {
+					kept.push_back(row);
+				} else if (keys.insert(ExaltedKey(cell(row, 2), cell(row, 3))).second && at[1] < row.size()) {
+					row[at[1]] = "0";
+					added.push_back(row);
+					++gone;
+				}
+			}
+			removed = kept;
+			report.done.push_back(std::string(b == 0 ? "cubemain" : "base/cubemain") + ": " + std::to_string(added.size() - changed - gone) + " recipes in, " + std::to_string(removed.size()) + " out");
+			if (changed + gone != 0) {
+				report.done.push_back(std::string(b == 0 ? "cubemain" : "base/cubemain") + ": " + std::to_string(changed) + " Exalted Items recipes changed, " + std::to_string(gone)
+				                      + " removed (written with enabled 0); the exalted codes in them are this install's");
+			}
 		}
 		std::string cols = "[";
 		for (size_t c = 0; c < columns.size(); ++c) {

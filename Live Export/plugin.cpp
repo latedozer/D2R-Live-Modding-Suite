@@ -39,7 +39,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.1.0";
+constexpr const char* kVersion = "0.2.0";
 
 const D2RL::PluginContext*   g_ctx     = nullptr;
 const D2RL::ThreadService*   g_threads = nullptr;
@@ -432,6 +432,9 @@ void ExportMpq(Job& job) {
 		storage = nullptr;
 	}
 	exporter::Report report;
+	if (!withExalted) { // a plain mod: Exalted Items makes its own rows again at every start
+		exporter::LeaveOutExaltedRows(job.edits, report);
+	}
 	// the tables (the main ones; the older data sets' base\ copies when the mod has them)
 	const auto table = [&](const std::string& path, bool always, const auto& change) {
 		std::string   text;
@@ -484,7 +487,18 @@ void ExportMpq(Job& job) {
 		}
 		const exporter::Tsv& list = main ? e.recipes : e.recipesBase;
 		if (!list.rows.empty()) {
-			table(std::string(folder) + "cubemain.txt", main, [&](exporter::Tsv& t) { return exporter::ApplyCube(t, list, report, main ? "cubemain" : "base\\cubemain"); });
+			table(std::string(folder) + "cubemain.txt", main, [&](exporter::Tsv& t) {
+				if (withExalted) {
+					return exporter::ApplyCube(t, list, report, main ? "cubemain" : "base\\cubemain");
+				}
+				// plain: the list without the Exalted Items rows you did not change (option a, agreed with the Exalted Items session)
+				std::string   made;
+				exporter::Tsv madeAgainst;
+				if (job.sources.exalted.empty() || !ReadWhole(job.sources.exalted + L"\\" + Widen(std::string(folder) + "cubemain.txt"), made) || !exporter::ParseTsv(made, madeAgainst)) {
+					madeAgainst = t;
+				}
+				return exporter::ApplyCubePlain(t, list, madeAgainst, report, main ? "cubemain" : "base\\cubemain");
+			});
 		}
 	}
 	if (!names.empty()) {
@@ -529,7 +543,7 @@ void ExportMpq(Job& job) {
 	                        + "\r\n" + std::to_string(files) + " files of the mod" + (withExalted ? ", " + std::to_string(exaltedFiles) + " of Exalted Items" : "") + "\r\n\r\n" + ReportText(report)
 	                        + (job.notes.empty() ? "" : "\r\nSkipped lines:\r\n" + job.notes)
 	                        + "\r\nTo play it: copy the folder '" + job.name + "' into the game's mods folder and start the game with -mod " + job.name + ".\r\n"
-	                        + (withExalted ? "It already holds Exalted Items' rows: switch the Exalted Items plugin off for it (see exalted mod/Live-Suite-Export-Compatibility.md).\r\n" : "");
+	                        + (withExalted ? "It already holds Exalted Items' rows. Keep the Exalted Items plugin ON (version 1.1.0 or later): it sees that and uses the exported tables as they are, adding only its game hooks (unique and set drops, the restore strip, the loot filter box). An older Exalted Items would add its rows a second time.\r\n" : "");
 	WriteExport(out + L"\\export-report.txt", about);
 	LogF("%s", about.c_str());
 	Tell({ "Live Export: " + job.name + ".mpq written (" + std::to_string(files + exaltedFiles) + " files, " + std::to_string(report.done.size()) + " changes in, " + std::to_string(report.problems.size()) + " left out)",
@@ -564,6 +578,7 @@ void ExportD2rmm(Job& job) {
 		CascCloseStorage(storage);
 	}
 	exporter::Report report;
+	exporter::LeaveOutExaltedRows(job.edits, report); // D2RMM's tables never hold them; Exalted Items makes them at start
 	const std::string ts   = exporter::D2rmmTs(job.edits, cube, cubeBase, [&](const std::string& w) { return keys.count(w) != 0; }, report);
 	const std::string json = exporter::D2rmmJson(job.name, "1.0", "The changes made in the game with the Live Suite (made from the mod '" + job.sources.modName + "'). Install it after the mods it was made with.");
 	const bool        ok   = WriteExport(out + L"\\mod.ts", ts) && WriteExport(out + L"\\mod.json", json);

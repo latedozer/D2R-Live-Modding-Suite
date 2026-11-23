@@ -84,6 +84,22 @@ bool ApplyCube(Tsv& cube, const Tsv& recipes, Report& report, const char* which)
 std::string AddStrings(const std::string& json, const std::vector<NewString>& strings, long nextId);
 long        HighestStringId(const std::string& json);
 
+// ---- Exalted Items' rows (agreed with the Exalted Items session, 2026-11-23; Exalted Items 1.2.0
+// IndexModRows). Its cube rows start with "[xlt] ". A mod that brings one keeps it; Exalted Items
+// makes none for the same key, and enabled 0 means "removed". Keys, on K(cell) = trimmed, one
+// pair of surrounding quotes off, lower case: output contains "exc" -> upgrade, key K(input 1);
+// else contains "eli" -> back to elite, key K(input 1) up to the first comma; else restore, the same.
+bool        IsExalted(const std::string& description); // starts with exactly "[xlt] "
+std::string ExaltedKey(const std::string& output, const std::string& input1); // "upgrade:..", "downgrade:..", "restore:.."
+// The rows Exalted Items makes again at every start on a plain mod (its stats other than the
+// xlt_unused_ fillers, its xlt- properties): edits to them are left out and reported. Made stats
+// past 486 are left out too (Exalted Items' own stats start at 487).
+void LeaveOutExaltedRows(Edits& edits, Report& report);
+// The plain .mpq's cube list: the user's list without Exalted Items' rows the user did not
+// change; a changed one is kept, a removed one is written with enabled 0. `madeAgainst`: the
+// list the recipes were made against (Exalted Items' cubemain copy).
+bool ApplyCubePlain(Tsv& cube, const Tsv& recipes, const Tsv& madeAgainst, Report& report, const char* which);
+
 // The D2RMM mod: mod.json and mod.ts doing the same to whatever tables D2RMM hands it.
 // `baseCube` / `baseCubeBase`: the lists the recipes were made against (for what was added
 // and removed).

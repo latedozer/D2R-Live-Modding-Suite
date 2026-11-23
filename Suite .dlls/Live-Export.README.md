@@ -1,6 +1,6 @@
 # Live Export
 
-`d2rl-live-export.dll`, version 0.1.0 (**new, not yet tried in the game**). A D2RLoader plugin for
+`d2rl-live-export.dll`, version 0.2.0 (**new, not yet tried in the game**). A D2RLoader plugin for
 Diablo II: Resurrected, made for game build 3.4.95041 and D2RLoader 1.3.1.
 
 ## What it does
@@ -17,8 +17,9 @@ Two kinds of export:
   data. Names of affixes you made are added to the mod's strings. The mod keeps your save folder,
   so your characters are there.
   - By default the tables Exalted Items keeps adjusted copies of are taken from those copies (what
-    the game really reads). **Play such an export with the Exalted Items plugin switched off**, or
-    its rows would be added a second time.
+    the game really reads). **Keep the Exalted Items plugin on** (1.1.0 or later): it sees its rows
+    are already there and only adds its game hooks (unique and set drops, the restore strip, the
+    loot filter box). An older Exalted Items would add its rows a second time.
   - The **plain** export leaves Exalted Items' copies out; the Exalted Items plugin then works on it
     as on any mod.
 - **A D2RMM mod** (`mod.json` + `mod.ts`): the same changes, made by D2RMM on top of your other
@@ -29,6 +30,25 @@ Two kinds of export:
   with your stat would then read wrong.
 
 Every export has an `export-report.txt` that lists what is in it and what was left out.
+
+## Exalted Items' recipes and rows
+
+Exalted Items makes its own cube recipes (upgrade, back to elite, restore; their description
+starts with `[xlt] `) and its own stat, property and item rows at every game start. With Exalted
+Items **1.2.0 or later**:
+
+- **Recipes you changed** are carried by the D2RMM mod and the plain export; Exalted Items keeps
+  them as they are and makes none of its own for the same thing.
+- **Recipes you removed** are written with `enabled` 0; Exalted Items then makes none.
+- **Recipes you did not touch** are left out of the D2RMM mod and the plain export, so Exalted Items
+  keeps making them from its settings.
+- **Edits to Exalted Items' own stat and property rows** (`xlt_roll_...`, `xlt-r...`) are not carried
+  by those two exports (the report lists them): Exalted Items makes those rows again. A stat you
+  made in one of its empty rows (`xlt_unused_...`) is carried.
+- The export with Exalted Items' copies holds all of it as the game read it; Exalted Items 1.1.0 or
+  later uses it as it is.
+- The exalted item codes in carried recipes are the ones of this install; with other mods another
+  install can have other codes.
 
 ## What it needs
 

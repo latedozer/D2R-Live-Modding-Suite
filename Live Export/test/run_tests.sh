@@ -16,4 +16,10 @@ g++ -std=c++20 -O2 -Wall -Wextra -o build/export_test test/export_test.cpp expor
 ./build/export_test "$EXCEL" build/work || status=1
 echo "== d2rmm"
 node test/run_d2rmm.mjs "$EXCEL" build/work || status=1
+echo "== exalted (Exalted Items' own generator on the exports)"
+if [ -x "../../exalted mod/exalted-plugin/build/native/gen_test" ]; then
+	./test/check_exalted.sh || status=1
+else
+	echo "skipped: Exalted Items' generator is not built (../../exalted mod/exalted-plugin)"
+fi
 exit $status
