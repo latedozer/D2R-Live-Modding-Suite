@@ -33,8 +33,11 @@
 
 #include "cube_core.h"
 #include "../Mod Book/mod_book_api.h"
+#include "../Live Properties Mod/live_props_api.h"
+#include "../Live Tables/live_tables_api.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 
 
 #include <atomic>
@@ -47,7 +50,10 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.15.0";
+#define LCR_VERSION "0.16.7"
+constexpr const char* kVersion = LCR_VERSION;
+// The version in the DLL's export table, for install.sh (Suite .dlls/previous/<name>.<version>.dll).
+extern "C" __declspec(dllexport) const char LiveSuiteVersion[] = "d2rl-live-cube-recipes " LCR_VERSION;
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -272,7 +278,20 @@ struct RealGame : cube::Game {
 		g_link.mod(version, text, row, static_cast<int>(offset));
 		int16_t id = 0;
 		memcpy(&id, row + offset, sizeof(id));
-		return id >= 0; // the game leaves -1 for a code no property and no property group has
+		if (id >= 0) {
+			return true;
+		}
+		// The game leaves -1 for a code no property and no property group has. A property made on
+		// Live Properties' Properties tab this session is not in the game's name table until the
+		// next start: Live Properties knows its row. The field is the row's number, 32 bits.
+		const liveprops::Api* props = liveprops::Find();
+		const int             found = props != nullptr && props->findProperty != nullptr ? props->findProperty(text, version) : -1;
+		if (found < 0) {
+			return false;
+		}
+		const uint32_t number = static_cast<uint32_t>(found);
+		memcpy(row + offset, &number, sizeof(number));
+		return true;
 	}
 	int Class(const char* text) override {
 		void* names = *reinterpret_cast<void**>(static_cast<uint8_t*>(tables) + kClassesAt);
@@ -424,6 +443,7 @@ struct Bank {
 	uint64_t                 lastMs = 0;
 	std::string              lastLine;
 	std::vector<std::string> lastProblems;
+	int                      lastRefused = 0; // lines of the last build the game could not read
 };
 
 SRWLOCK                  g_lock = SRWLOCK_INIT; // everything below
@@ -439,8 +459,14 @@ const D2RL::ThreadService* g_threads = nullptr;
 std::atomic<bool>          g_wanted { false }; // a job is asked for and has not run yet
 std::atomic<uint64_t>      g_askedMs { 0 };
 
+// What Live Tables changed since the last entry (see OnTableChange): taken first thing under the
+// lock, so nothing is compiled against an old cache.
+void TakeTableChanges();
 struct Guard {
-	Guard() { AcquireSRWLockExclusive(&g_lock); }
+	Guard() {
+		AcquireSRWLockExclusive(&g_lock);
+		TakeTableChanges();
+	}
 	~Guard() { ReleaseSRWLockExclusive(&g_lock); }
 };
 
@@ -1064,6 +1090,10 @@ void Apply(Bank& bank, bool atStart) {
 	for (const std::string& problem : out.problems) {
 		Say(std::string(bank.name) + " " + problem + " - this line is left out until it is fixed");
 	}
+	for (const std::string& note : out.notes) {
+		Say(std::string(bank.name) + " " + note);
+	}
+	bank.lastRefused = out.refused;
 	if (out.refused > static_cast<int>(out.problems.size())) {
 		Say(std::string(bank.name) + ": " + std::to_string(out.refused - static_cast<int>(out.problems.size())) + " more lines the game could not read");
 	}
@@ -1142,15 +1172,327 @@ void Ask() {
 	}
 }
 
+// ---- Live Tables (../Live Tables/live_tables_api.h): stat and property rows that come and go during play
+//
+// A recipe record holds row numbers: a mod cell the property's, a param cell naming a stat the
+// stat's. The compiled lines kept between builds (listCache, editCache, the book's rowMemo) hold
+// those numbers and the refusals ("not a property code"). When Live Tables grows a table, a line
+// refused for a code that did not exist yet can be read now; when it takes a row out (Shrink,
+// Remove), numbers above it are one lower. Its change listener only records which (no lock, no
+// allocation: it runs in Live Tables' growth job) and asks for a job; the next entry under the
+// lock lets the kept lines go, and the job compiles the cube's list again from the text the cube
+// last took - only when numbers moved, or a line of the last build was refused.
+std::atomic<uint32_t> g_tableChange { 0 }; // 1 = a row came, 2 = numbers moved, 4 = a row was renamed
+std::atomic<bool>     g_tablesHeard { false };
+
+// Ask() without its last resort (running Job here): from Live Tables' job no lock may be taken.
+void AskSoon() {
+	g_wanted.store(true);
+	g_askedMs.store(NowMs());
+	if (g_threads == nullptr) {
+		return; // the next entry takes the change
+	}
+	if (g_threads->runOnGameThread(g_ctx, Job, nullptr) == D2RL::Threads::Result::Success) {
+		static_cast<void>(g_threads->runOnUiThread(g_ctx, Later, nullptr)); // in case no game is running
+	} else {
+		static_cast<void>(g_threads->runOnUiThread(g_ctx, Job, nullptr));
+	}
+}
+
+// Renames (Live Tables API 3, Change kind Rename): the listener copies the two names into this
+// ring (one writer: Live Tables' job; read under the lock), no allocation. The next entry rewrites
+// the code in the recipe files (after a dated backup) and the recipe book's unsaved rows.
+struct Renamed {
+	int  table = 0, version = 0;
+	char oldName[64] = "", newName[64] = "";
+};
+constexpr size_t      kRenameRoom = 16;
+Renamed               g_renames[kRenameRoom];
+std::atomic<size_t>   g_renameHead { 0 }, g_renameTail { 0 }; // written / taken
+std::atomic<int>      g_renamesLost { 0 };
+std::vector<Renamed>  g_editorRenames; // under the lock: for the book's rows, done on the UI thread
+
+void RecordRename(const livetables::Change* change) {
+	if (change->size < offsetof(livetables::Change, newName) + sizeof(change->newName) || change->oldName == nullptr || change->newName == nullptr) {
+		return;
+	}
+	const size_t head = g_renameHead.load();
+	if (head - g_renameTail.load() >= kRenameRoom || strlen(change->oldName) >= sizeof(Renamed::oldName) || strlen(change->newName) >= sizeof(Renamed::newName)) {
+		g_renamesLost.fetch_add(1);
+		return;
+	}
+	Renamed& slot = g_renames[head % kRenameRoom];
+	slot.table    = static_cast<int>(change->table);
+	slot.version  = change->dataVersion;
+	strcpy(slot.oldName, change->oldName);
+	strcpy(slot.newName, change->newName);
+	g_renameHead.store(head + 1);
+}
+
+void __cdecl OnTableChange(void*, const livetables::Change* change) noexcept {
+	if (change == nullptr || change->size < offsetof(livetables::Change, revision) + sizeof(change->revision)) {
+		return;
+	}
+	uint32_t bits = 0;
+	switch (change->kind) {
+	case livetables::ChangeKind::Grow: bits = 1; break;
+	case livetables::ChangeKind::Shrink:
+	case livetables::ChangeKind::Remove: bits = 2; break;
+	case livetables::ChangeKind::Rename:
+		RecordRename(change);
+		bits = 4;
+		break;
+	default: return; // Load: SetUp starts over anyway; Disable / Enable keep every number
+	}
+	g_tableChange.fetch_or(bits);
+	AskSoon();
+}
+
+int __cdecl CanRemove(void*, livetables::Table table, int dataVersion, int number, char* why, size_t whySize) noexcept;
+struct Bank;
+Bank* ShownBank();
+
+// Live Tables API 1 (0.1.x) has the listener already; a version 2 DLL answers a version 1 caller too.
+void ListenToTables() {
+	if (g_tablesHeard.load()) {
+		return;
+	}
+	const HMODULE module = GetModuleHandleW(L"d2rl-live-tables.dll");
+	const auto    get    = module != nullptr ? reinterpret_cast<const livetables::Api*(__cdecl*)(uint32_t)>(reinterpret_cast<void*>(GetProcAddress(module, "LiveTablesGetApi"))) : nullptr;
+	const livetables::Api* lt = get != nullptr ? get(1) : nullptr;
+	if (lt == nullptr || lt->size < offsetof(livetables::Api, removeListener) + sizeof(lt->removeListener) || lt->addListener == nullptr) {
+		return;
+	}
+	const int handle = lt->addListener(OnTableChange, nullptr);
+	g_tablesHeard.store(handle > 0);
+	// version 3: the remove veto (asked again for the full table, a version 1 DLL has no such field)
+	const livetables::Api* v3 = get(3);
+	if (v3 != nullptr && v3->version >= 3 && v3->size >= offsetof(livetables::Api, removeVeto) + sizeof(v3->removeVeto) && v3->addVeto != nullptr) {
+		const int veto = v3->addVeto(CanRemove, nullptr);
+		LogF("Live Tables: %s", veto > 0 ? "a stat or property row your recipe files name cannot be removed (remove veto on)" : "its remove veto REFUSED");
+	}
+	LogF("Live Tables: found (API %u); %s", lt->version,
+		handle > 0 ? "a property or stat row made or taken out during play is read into the recipes at once" : "its change listener REFUSED - a recipe line refused for a property made later is read again when you type recipes");
+}
+
+// Live Tables' remove veto (API 3): remove() asks it first, on the thread calling remove(), with
+// none of Live Tables' locks held. The cube's own records Live Tables checks itself; this looks at
+// the recipe TEXT, which a record may not show yet: recipes.txt as it is on disk now, the text the
+// cube last took, and the recipe book's unsaved rows. A line that names the row (or, for a middle
+// row, any row after it, which would move) refuses the removal, naming the line.
+std::atomic<DWORD> g_uiThread { 0 }; // the thread the recipe book runs on (seen in its jobs)
+bool               EditorHasChanges();
+std::string        EditorText(); // the book's rows as a file (UI thread only)
+
+int __cdecl CanRemove(void*, livetables::Table table, int dataVersion, int number, char* why, size_t whySize) noexcept {
+	{
+		if (number < 0 || (table != livetables::Table::Properties && table != livetables::Table::ItemStatCost)) {
+			return 1;
+		}
+		const bool  stats = table == livetables::Table::ItemStatCost;
+		std::string found;
+		{
+			Guard guard;
+			for (Bank& bank : g_banks) {
+				const bool sameVersion = bank.version == dataVersion || dataVersion == 0 || (bank.version <= 2 && dataVersion <= 2); // 1 and 2: one bank
+				if (!bank.on || !sameVersion) {
+					continue;
+				}
+				std::vector<std::pair<std::string, std::string>> texts; // what, text
+				std::string onDisk;
+				if (ReadWhole(bank.path, onDisk)) {
+					texts.emplace_back(bank.name, std::move(onDisk));
+				}
+				texts.emplace_back(std::string(bank.name) + " (as the cube took it)", bank.mineText);
+				if (&bank == ShownBank() && EditorHasChanges()) {
+					if (GetCurrentThreadId() != g_uiThread.load()) {
+						found = "the recipe book has unsaved changes; save or discard them first";
+						break;
+					}
+					texts.emplace_back("the recipe book (not saved)", EditorText());
+				}
+				RealGame             game(bank.version, bank.tables);
+				std::vector<uint8_t> row(cube::kWideRow);
+				std::string          problem;
+				for (const auto& [what, text] : texts) {
+					const cube::Sheet sheet = cube::ReadSheet(std::string(text));
+					if (!sheet.usable) {
+						continue;
+					}
+					for (size_t i = 0; i < sheet.lines.size() && found.empty(); ++i) {
+						if (cube::IsBlank(sheet.lines[i]) || !cube::CompileLine(game, bank.layout, sheet.header, sheet.lines[i], static_cast<int>(i), row.data(), problem)) {
+							continue;
+						}
+						const int column = cube::NamesRow(bank.layout, row.data(), stats, static_cast<uint32_t>(number));
+						if (column >= 0) {
+							found = what + ": " + cube::Describe(sheet, i) + " names " + (stats ? "stat " : "property ") + std::to_string(number)
+							      + " or a row after it in " + cube::kColumns[column].name + "; change or remove that line first";
+						}
+					}
+					if (!found.empty()) {
+						break;
+					}
+				}
+				if (!found.empty()) {
+					break;
+				}
+			}
+		}
+		if (found.empty()) {
+			return 1;
+		}
+		LogF("Live Tables asked to remove %s row %d (data version %d): refused - %s", stats ? "stat" : "property", number, dataVersion, found.c_str());
+		if (why != nullptr && whySize != 0) {
+			snprintf(why, whySize, "Live Cube Recipes: %s", found.c_str());
+		}
+		return 0;
+	}
+}
+
+std::string StampNow() {
+	SYSTEMTIME now {};
+	GetLocalTime(&now);
+	char text[32];
+	snprintf(text, sizeof(text), "%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+	return text;
+}
+
+void EditorRenameJob(const D2RL::PluginContext*, void*) noexcept;
+
+// A rename in the recipe files: recipes.txt (or the classic one) is the suite's own file in
+// live-suite, so the code in it follows the row (lead-71, 2026-11-25): a dated copy first
+// (recipes.before-rename-<date>-<time>.txt), then the file with every cell that named the old code
+// rewritten, nothing else changed. The text the cube took is rewritten the same way (its records
+// keep the row's number, so the cube needs nothing).
+// One file of the plugin's folder: a dated copy first (`copy`), then every cell that named the old
+// code rewritten; a log line either way it changed. `shown` names the file in messages.
+void RenameFile(const std::wstring& path, const std::wstring& copy, const std::string& shown, bool stats, const Renamed& r) {
+	const char*              kind = stats ? "stat" : "property";
+	std::string              text, before;
+	std::vector<std::string> where;
+	if (!ReadWhole(path, text)) {
+		return; // no such file
+	}
+	before          = text;
+	const int cells = cube::RenameInText(text, stats, r.oldName, r.newName, &where);
+	if (cells == 0) {
+		LogF("%s: %s %s is now %s - no line names it", shown.c_str(), kind, r.oldName, r.newName);
+		return;
+	}
+	const size_t slash = copy.find_last_of(L'\\');
+	if (slash != std::wstring::npos) {
+		MakeFolders(copy.substr(0, slash));
+	}
+	const bool  kept  = WriteOwn(copy, before);
+	const bool  wrote = kept && WriteOwn(path, text);
+	std::string places;
+	for (size_t i = 0; i < where.size() && i < 5; ++i) {
+		places += (i == 0 ? "" : ", ") + where[i];
+	}
+	if (where.size() > 5) {
+		places += ", ...";
+	}
+	const std::string copyShown = Narrow(copy.substr(g_folder.size() + 1));
+	if (wrote) {
+		LogF("%s: %s %s is now %s - %d %s rewritten (%s); the file before: %s", shown.c_str(), kind, r.oldName, r.newName, cells, cells == 1 ? "cell" : "cells", places.c_str(), copyShown.c_str());
+	} else {
+		Say(shown + ": " + kind + " " + r.oldName + " is now " + r.newName + ", but the file could not be " + (kept ? "written" : "copied first") + " (another program holds it?); change " + places + " by hand");
+	}
+}
+
+// The recipe files of the plugin's folder: recipes.txt (or the classic one), deleted.txt (the
+// defaults the user deleted) and, for the first list, every template.
+void TakeRenames() {
+	if (const int lost = g_renamesLost.exchange(0); lost != 0) {
+		LogF("Live Tables: %d renames came with names too long or too many at once; the recipe files were not rewritten for them", lost);
+	}
+	bool forBook = false;
+	while (g_renameTail.load() != g_renameHead.load()) {
+		const Renamed r = g_renames[g_renameTail.load() % kRenameRoom];
+		g_renameTail.fetch_add(1);
+		const bool        stats = r.table == static_cast<int>(livetables::Table::ItemStatCost);
+		const std::string stamp = StampNow();
+		for (Bank& bank : g_banks) {
+			const bool sameVersion = bank.version == r.version || r.version == 0 || (bank.version <= 2 && r.version <= 2);
+			if (!bank.on || !sameVersion) {
+				continue;
+			}
+			const auto stemOf = [](const std::wstring& path) {
+				const size_t slash = path.find_last_of(L'\\'), dot = path.rfind(L'.');
+				return path.substr(0, dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash) ? dot : path.size());
+			};
+			const std::wstring when = L".before-rename-" + Widen(stamp) + L".txt";
+			RenameFile(bank.path, stemOf(bank.path) + when, bank.name, stats, r);
+			RenameFile(bank.deletedPath, stemOf(bank.deletedPath) + when, Narrow(bank.deletedPath.substr(g_folder.size() + 1)), stats, r);
+			static_cast<void>(ReadWhole(bank.deletedPath, bank.deletedText));
+			cube::RenameInText(bank.mineText, stats, r.oldName, r.newName, nullptr);
+			if (bank.pending) {
+				cube::RenameInText(bank.pendingText, stats, r.oldName, r.newName, nullptr);
+			}
+			if (&bank == ShownBank()) {
+				// templates: their copies go to templates\before-rename\, out of the book's list of templates
+				WIN32_FIND_DATAW entry {};
+				const HANDLE     find = FindFirstFileW((g_folder + L"\\templates\\*.txt").c_str(), &entry);
+				if (find != INVALID_HANDLE_VALUE) {
+					do {
+						if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+							const std::wstring file = entry.cFileName;
+							RenameFile(g_folder + L"\\templates\\" + file, g_folder + L"\\templates\\before-rename\\" + stemOf(file) + when, "templates\\" + Narrow(file), stats, r);
+						}
+					} while (FindNextFileW(find, &entry) != 0);
+					FindClose(find);
+				}
+				g_editorRenames.push_back(r);
+				forBook = true;
+			}
+		}
+	}
+	if (forBook) {
+		BookAsk(EditorRenameJob);
+	}
+}
+
+void TakeTableChanges() {
+	const uint32_t bits = g_tableChange.exchange(0);
+	if (bits == 0 || !g_setUp) {
+		return;
+	}
+	if ((bits & 4) != 0) {
+		TakeRenames();
+	}
+	int again = 0;
+	for (Bank& bank : g_banks) {
+		cube::Cache().swap(bank.listCache);
+		cube::Cache().swap(bank.editCache);
+		cube::Cache().swap(bank.cache);
+		bank.rowMemo.clear();
+		bank.defaultsIndex = cube::DefaultsIndex {}; // it pointed into listCache
+		bank.indexed       = false;
+		if (bank.on && !bank.pending && ((bits & 2) != 0 || ((bits & 1) != 0 && bank.lastRefused > 0))) {
+			bank.pending     = true;
+			bank.pendingText = bank.mineText;
+			++again;
+		}
+	}
+	if ((bits & 3) != 0) {
+		LogF("Live Tables: %s; %s", (bits & 2) != 0 ? "a row was taken out (numbers moved)" : "a row was made",
+			again != 0 ? "the recipes are compiled again" : "no recipe line waited for it");
+	}
+}
+
 void BookSetUp();
+void SectionsChanged();
 extern std::string g_bookOff;
 
 void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
+	ListenToTables(); // Live Tables may load after this plugin
 	{
 		Guard guard;
+		g_tableChange.store(0); // the tables are read anew: everything starts over
 		SetUp();
 	}
 	BookSetUp();
+	SectionsChanged(); // the legend's entries are there now
 	if (!g_bookOff.empty()) {
 		LogF("panels: not available - %s", g_bookOff.c_str());
 	}
@@ -1306,7 +1648,53 @@ std::string         g_bookOff = "not set up"; // why there are no books
 // are the Mod Book's; this hands it the texts and places.
 struct LayoutText {
 	const Book& book;
+	int         next = 0, rowY = modbook::kActionY; // an older Mod Book: where the next action goes
 	LayoutText(const Book& b, const std::string&) : book(b) {}
+	// The tab's own buttons in rows under the tab rows (the Mod Book's action row: the same places
+	// on every tab; slots 232 wide, 4 to a row). An older Mod Book: the same places, by hand.
+	// The answer: the first y under the rows so far.
+	int action(const std::string& click, const std::string& text, const char* color, int slots) {
+		// The most letters a label can have in a button of 1, 2, 3, 4 slots before it wraps out of it
+		// (Mod Book's finding: 12 in one slot, 28 in two; three and four slots counted the same way).
+		static const size_t most[] = { 12, 28, 36, 38 };
+		const int           at     = slots < 1 ? 0 : slots > 4 ? 3 : slots - 1;
+		if (text.size() > most[at]) {
+			LogF("layout: the button label \"%s\" is too long for %d slot(s) (at most %zu letters)", text.c_str(), at + 1, most[at]);
+		}
+		if (modbook::HasRows(g_book)) {
+			return g_book->action(g_page, click.c_str(), text.c_str(), color, slots);
+		}
+		slots = slots < 1 ? 1 : slots > modbook::kActionsInRow ? modbook::kActionsInRow : slots;
+		if (next + slots > modbook::kActionsInRow) {
+			next = 0;
+			rowY += modbook::kActionRowStep;
+		}
+		static const int widths[] = { 232, 470, 700, 742 };
+		button(click, 82 + next * (modbook::kActionSlot + modbook::kActionGap), rowY, widths[slots - 1], text, color != nullptr ? color : "$FontColorGoldYellow");
+		next += slots;
+		return rowY + modbook::kActionRowStep;
+	}
+	// Ends the row: the next action starts a new one (so that a button that comes and goes does
+	// not move the ones after it).
+	int endRow() {
+		if (modbook::HasRows(g_book)) {
+			return g_book->action(g_page, nullptr, nullptr, nullptr, 0);
+		}
+		if (next != 0) {
+			next = 0;
+			rowY += modbook::kActionRowStep;
+		}
+		return rowY;
+	}
+	// The search box, where every tab has it.
+	void search(const std::string& typed, const std::string& hint) {
+		if (modbook::HasRows(g_book)) {
+			g_book->search(g_page, typed.c_str(), hint.c_str());
+			return;
+		}
+		slot("SearchSlot", 210, 138);
+		label("Search", 250, 166, 660, 56, typed.empty() ? "$FontColorGoldYellow" : "$FontColorWhite", "left", false, typed.empty() ? hint : Fit(typed, 34) + "_");
+	}
 	void title(const std::string& text) { g_book->title(g_page, text.c_str()); }
 	void label(const std::string& name, int x, int y, int width, int height, const char* color, const char* align, bool wrap, const std::string& text) {
 		g_book->label(g_page, name.c_str(), x, y, width, height, color, align, wrap ? 1 : 0, text.c_str());
@@ -1331,23 +1719,21 @@ std::string ListLayout(const Book& b, const std::string& panelName) {
 	const size_t rows = static_cast<size_t>(b.rows);
 	LayoutText   l(b, panelName);
 	l.title(b.heading);
-	l.slot("SearchSlot", 210, 138);
-	l.label("Search", 250, 166, 660, 56, b.words.empty() ? "$FontColorGoldYellow" : "$FontColorWhite", "left", false,
-		b.words.empty() ? (b.legend && b.tab == 1 ? "Type: op 18, param, stat 370, plvl" : b.hint) : Fit(b.words, 34) + "_");
-	int top = 268; // the legend: under the Mod Book's row of tabs (its two tabs are tabs there)
+	l.search(b.words, b.legend && b.tab == 1 ? "Type: op 18, param, stat 370, plvl" : b.hint);
+	int top = 268; // the legend (a Mod Book before 0.8.0): under the Mod Book's row of tabs (its two tabs are tabs there)
 	if (!b.legend) {
 		if (!g_editor.undo.empty()) { // beside the search slot
 			l.button("Undo", 86, 172, 116, "Undo");
 		}
-		l.button("New", 82, 262, 232, "New recipe");
-		l.button("Templates", 322, 262, 216, "Templates");
+		l.action("New", "New recipe", "$FontColorWhite", 1);
+		l.action("Templates", "Templates", "$FontColorWhite", 1);
 		if (g_editor.changes != 0) {
-			l.button("Save", 546, 262, 330, "Save " + std::to_string(g_editor.changes) + (g_editor.changes == 1 ? " change" : " changes"), "$FontColorGreen");
-			l.button("Discard", 884, 262, 188, "Discard", "$FontColorLightRed");
+			l.action("Save", "Save (" + std::to_string(g_editor.changes) + ")", "$FontColorGreen", 1); // the changes not saved yet
+			l.action("Discard", "Discard", "$FontColorLightRed", 1);
 		}
-		l.button("Search", 82, 312, 470, "Search for new recipes", "$FontColorLightTeal");
-		l.button("RestoreAll", 590, 312, 482, "Restore deleted defaults", "$FontColorLightTeal");
-		top = 366;
+		l.endRow();
+		l.action("Search", "Search for new recipes", "$FontColorLightTeal", 2);
+		top = l.action("RestoreAll", "Restore deleted defaults", "$FontColorLightTeal", 2);
 	}
 	for (size_t i = 0; i < rows; ++i) {
 		const size_t at    = b.top + i;
@@ -1388,18 +1774,21 @@ std::string CardLayout(const Book& b, const std::string& panelName) {
 	const bool         off    = cells.cell[0] == "0";
 	LayoutText         l(b, panelName);
 	l.title("Recipe");
-	l.button("Back", 82, 150, 200, "Back");
-	l.button("Edit", 330, 150, 200, "Edit");
-	l.button("Copy", 570, 150, 300, "Copy as new");
+	l.action("Back", "Back", "$FontColorWhite", 1);
+	l.action("Edit", "Edit", "$FontColorWhite", 1);
+	l.action("Copy", "Copy as new", "$FontColorWhite", 1);
+	l.endRow();
 	if (!unread) {
-		l.button("Toggle", 82, 206, 250, off ? "Enable" : "Disable");
+		l.action("Toggle", off ? "Enable" : "Disable", "$FontColorWhite", 1);
 	}
-	l.button("Remove", 380, 206, 250, "Remove", "$FontColorLightRed");
+	const int under = l.action("Remove", "Remove", "$FontColorLightRed", 1);
 	const std::string what = unread ? "The game cannot read it: " + e.problemOf[row]
-	                                : std::string(e.own[row] != 0 ? "Changed or made by you." : "As the mod has it.") + (off ? " It is switched off." : "");
-	l.label("What", 82, 262, 990, 70, "$FontColorLightTeal", "left", true, what);
-	int y = 340, shown = 0;
-	for (int field = -1; field < static_cast<int>(cube::kColumnCount) && shown < 24; ++field) {
+	                                : std::string(e.own[row] != 0 ? "Changed or made by you." : "As the mod has it.") + (off ? " It is switched off." : "")
+	                                      + (e.problemOf[row].empty() ? std::string() : " Note: " + e.problemOf[row] + ".");
+	const int whatHigh = what.size() > 90 ? 110 : 70; // a note takes a second line
+	l.label("What", 82, under, 990, whatHigh, "$FontColorLightTeal", "left", true, what);
+	int y = under + whatHigh + 8, shown = 0;
+	for (int field = -1; field < static_cast<int>(cube::kColumnCount) && y + 40 <= 1340; ++field) {
 		const std::string text = field < 0 ? cells.description : cells.cell[static_cast<size_t>(field)];
 		if (text.empty()) {
 			continue;
@@ -1415,8 +1804,7 @@ std::string CardLayout(const Book& b, const std::string& panelName) {
 	return l.done();
 }
 
-constexpr int kEditRows = 11;
-constexpr int kEditTop  = 340; // the first cell's line, under the help
+constexpr int kEditRows = 10; // the cells shown at a time, under the action row and the help
 
 // The cells of one recipe, twelve at a time; a click picks the cell that is typed into.
 std::string EditLayout(const Book& b, const std::string& panelName) {
@@ -1424,13 +1812,13 @@ std::string EditLayout(const Book& b, const std::string& panelName) {
 	const size_t  top   = static_cast<size_t>(e.fieldTop);
 	LayoutText    l(b, panelName);
 	l.title(e.editRow < 0 ? "New Recipe" : "Edit Recipe");
-	l.button("Done", 82, 150, 188, "Done", "$FontColorGreen");
-	l.button("Cancel", 278, 150, 188, "Cancel", "$FontColorLightRed");
-	l.button("Name", 474, 150, 300, "Name it", "$FontColorLightTeal");
-	l.button("Cells", 782, 150, 300, e.allCells ? "Fewer cells" : "All cells");
-	// Below the tab row (y 250 and lower moves down with it), two lines at most: above it, a
-	// third line ran into the tab buttons.
-	l.label("Help", 82, 250, 990, 86, "$FontColorLightTeal", "left", true,
+	l.action("Done", "Done", "$FontColorGreen", 1);
+	l.action("Cancel", "Cancel", "$FontColorLightRed", 1);
+	l.action("Name", "Name it", "$FontColorLightTeal", 1);
+	const int under   = l.action("Cells", e.allCells ? "Fewer cells" : "All cells", "$FontColorWhite", 1);
+	const int kEditTop = under + 90; // the first cell's line, under the help
+	// Under the action row, two lines at most.
+	l.label("Help", 82, under, 990, 86, "$FontColorLightTeal", "left", true,
 		"Click a cell and type, or a legend entry (Ctrl+L). Enter: done. Tab, arrows: next cell. Ctrl+V: paste. \"Name it\": the description.");
 	for (int i = 0; i < kEditRows; ++i) {
 		const size_t at = top + static_cast<size_t>(i);
@@ -1539,21 +1927,22 @@ std::string TemplatesLayout(const Book& b, const std::string& panelName) {
 	const Editor& e = g_editor;
 	LayoutText    l(b, panelName);
 	l.title("Recipe Templates");
-	l.button("Back", 82, 150, 200, "Back");
-	l.button("SaveAs", 330, 150, 742, "Save the list in the book as a template", "$FontColorGreen");
-	l.label("Help", 82, 250, 990, 86, "$FontColorLightTeal", "left", true,
+	l.action("Back", "Back", "$FontColorWhite", 1);
+	const int under = l.action("SaveAs", "Save this list as a template", "$FontColorGreen", 3);
+	l.label("Help", 82, under, 990, 86, "$FontColorLightTeal", "left", true,
 		"A template is a whole recipe list kept under a name. Loading one replaces the book's list; the cube has it once you save.");
+	const int first = under + 92;
 	if (e.templates.empty()) {
-		l.label("None", 82, 370, 990, 40, "$FontColorGoldYellow", "center", false, "No template saved yet.");
+		l.label("None", 82, first + 20, 990, 40, "$FontColorGoldYellow", "center", false, "No template saved yet.");
 	}
 	for (size_t i = 0; i < e.templates.size() && i < kTemplateRows; ++i) {
-		const int y = 350 + static_cast<int>(i) * 96;
+		const int y = first + static_cast<int>(i) * 96;
 		l.label("Name" + std::to_string(i), 82, y, 990, 40, "$FontColorLightGold", "left", false, Fit(e.templates[i].name, 44) + "   (" + std::to_string(e.templates[i].recipes) + " recipes)");
 		l.button("Load" + std::to_string(i), 120, y + 42, 200, "Load");
 		l.button("Delete" + std::to_string(i), 360, y + 42, 220, "Delete", "$FontColorLightRed");
 	}
 	if (e.templates.size() > kTemplateRows) {
-		l.label("More", 82, 350 + static_cast<int>(kTemplateRows) * 96, 990, 40, "$FontColorGoldYellow", "left", false,
+		l.label("More", 82, first + static_cast<int>(kTemplateRows) * 96, 990, 40, "$FontColorGoldYellow", "left", false,
 			"... and " + std::to_string(e.templates.size() - kTemplateRows) + " more in the templates folder");
 	}
 	return l.done();
@@ -1695,6 +2084,48 @@ void EditorLoad() {
 	}
 }
 
+bool EditorHasChanges() {
+	return g_editor.changes != 0;
+}
+
+std::string EditorText() {
+	return RowsText(g_editor.rows);
+}
+
+// The renames for the recipe book's rows (and the steps Undo would put back), on the UI thread.
+void EditorRenameJob(const D2RL::PluginContext*, void*) noexcept {
+	g_uiThread.store(GetCurrentThreadId());
+	std::vector<Renamed> renames;
+	{
+		Guard guard;
+		renames.swap(g_editorRenames);
+	}
+	for (const Renamed& r : renames) {
+		const bool stats = r.table == static_cast<int>(livetables::Table::ItemStatCost);
+		int        cells = 0;
+		for (cube::Cells& row : g_editor.rows) {
+			cells += cube::RenameInCells(row, stats, r.oldName, r.newName);
+		}
+		for (cube::Cells& row : g_editor.deleted) { // the notes of deleted defaults, as deleted.txt
+			cube::RenameInCells(row, stats, r.oldName, r.newName);
+		}
+		for (auto* steps : { &g_editor.undo, &g_editor.redo }) {
+			for (Editor::Step& step : *steps) {
+				for (cube::Cells& row : step.rows) {
+					cube::RenameInCells(row, stats, r.oldName, r.newName);
+				}
+			}
+		}
+		if (cells != 0) {
+			LogF("the recipe book: %s %s is now %s - %d %s of its rows rewritten%s", stats ? "stat" : "property", r.oldName, r.newName, cells, cells == 1 ? "cell" : "cells",
+				g_editor.changes != 0 ? " (not saved yet)" : "");
+		}
+	}
+	if (AnyBookOpen()) {
+		BookAsk(BookJob);
+	}
+}
+
 // The recipe book's entries: the editor's rows, one entry a row.
 void EditorPreview(Book& b) {
 	Editor& e = g_editor;
@@ -1722,6 +2153,10 @@ void EditorPreview(Book& b) {
 	for (size_t r = 0; r < e.rows.size() && r < mine.lines.size(); ++r) {
 		key.assign(mine.lines[r]);
 		auto held = bank->rowMemo.find(key);
+		if (held != bank->rowMemo.end() && held->second.status == cube::LineStatus::Refused) {
+			bank->rowMemo.erase(held); // worked out again: what it names may exist now (a property made in Live Properties)
+			held = bank->rowMemo.end();
+		}
 		if (held == bank->rowMemo.end()) {
 			Bank::RowMemo         memo;
 			const cube::LineFacts facts = cube::FactsOf(game, bank->layout, bank->defaultsIndex, mine, r, bank->listCache);
@@ -1734,6 +2169,14 @@ void EditorPreview(Book& b) {
 				cube::CompileLine(game, bank->layout, mine.header, mine.lines[r], static_cast<int>(r), row.data(), memo.problem);
 				memo.shown.title  = "[cannot be read] " + memo.shown.title;
 				memo.shown.detail = memo.problem;
+			}
+			if (memo.status != cube::LineStatus::Refused) {
+				const std::vector<std::string> notes = cube::AmountNotes(mine.header, mine.lines[r]);
+				if (!notes.empty()) {
+					memo.problem      = notes[0];
+					memo.shown.title  = "[no amount] " + memo.shown.title;
+					memo.shown.detail = notes[0] + ".   " + memo.shown.detail;
+				}
 			}
 			if (memo.own) { // yours: marked, and found by searching "*"
 				memo.shown.title  = "* " + memo.shown.title;
@@ -2329,22 +2772,17 @@ void ClipboardSet(const std::string& text) {
 	CloseClipboard();
 }
 
-// A legend entry was clicked: its code goes into the cell being typed into. False: no cell is.
-bool LegendInsert(const Book& legend, const std::string& title) {
+// Is a cell of the recipe editor being typed into (so that a legend entry can be put in)?
+bool LegendCanInsert() {
+	return g_recipeBook.open.load() && g_editor.view == View::Edit && !g_editor.fields.empty();
+}
+
+// A legend entry's Insert: its text (the entry's insert: "shld", "18") goes into the cell being
+// typed into. False: no cell is, or the entry has nothing to put in.
+bool LegendInsert(const std::string& code) {
 	Editor& e = g_editor;
-	if (!g_recipeBook.open.load() || e.view != View::Edit || e.fields.empty()) {
+	if (!LegendCanInsert()) {
 		return false;
-	}
-	std::string code = title.substr(0, title.find("  -  "));
-	while (!code.empty() && code.back() == ' ') {
-		code.pop_back();
-	}
-	if (legend.tab == 1) { // columns and values: only "op 18" and "stat 370" stand for something to type, the number
-		const size_t space = code.find(' ');
-		if (space == std::string::npos || (code.compare(0, space, "op") != 0 && code.compare(0, space, "stat") != 0) || code.find_first_not_of("0123456789", space + 1) != std::string::npos || space + 1 >= code.size()) {
-			return false;
-		}
-		code = code.substr(space + 1);
 	}
 	if (code.empty()) {
 		return false;
@@ -2424,6 +2862,7 @@ bool EditorType(const std::string& keys) {
 
 // Whatever was asked for since the last time: clicks, typed keys, paging, a changed list.
 void __cdecl BookJob(const D2RL::PluginContext*, void*) noexcept {
+	g_uiThread.store(GetCurrentThreadId());
 	bool again = false;
 	for (Book* book : g_books) {
 		Book& b = *book;
@@ -2453,7 +2892,7 @@ void __cdecl BookJob(const D2RL::PluginContext*, void*) noexcept {
 					closed = true;
 				} else if (click.rfind("Row", 0) == 0) {
 					const size_t at = b.top + static_cast<size_t>(atoi(click.c_str() + 3));
-					if (at < b.found.size() && LegendInsert(b, b.entries[b.found[at]].title)) {
+					if (at < b.found.size() && LegendInsert(b.entries[b.found[at]].insert)) {
 						g_recipeBook.redo.store(true); // the cell editor shows it
 						again = true;
 					}
@@ -2557,6 +2996,7 @@ struct TabRef {
 TabRef g_tabRefs[] = { { &g_recipeBook, 0 }, { &g_legendBook, 0 }, { &g_legendBook, 1 } };
 
 void __cdecl TabDraw(void* user, modbook::Page* page) noexcept {
+	g_uiThread.store(GetCurrentThreadId());
 	const TabRef& ref = *static_cast<TabRef*>(user);
 	Book&         b   = *ref.book;
 	if (b.legend && b.tab != ref.tab) { // the legend's two tabs dragged to different sides: each draws its own
@@ -2570,6 +3010,7 @@ void __cdecl TabDraw(void* user, modbook::Page* page) noexcept {
 }
 
 void __cdecl TabClick(void* user, const char* what) noexcept {
+	g_uiThread.store(GetCurrentThreadId());
 	Book& b = *static_cast<TabRef*>(user)->book;
 	AcquireSRWLockExclusive(&g_typeLock);
 	b.clicks.emplace_back(what);
@@ -2578,6 +3019,7 @@ void __cdecl TabClick(void* user, const char* what) noexcept {
 }
 
 void __cdecl TabKeys(void* user, const char* typed) noexcept {
+	g_uiThread.store(GetCurrentThreadId());
 	Book& b = *static_cast<TabRef*>(user)->book;
 	AcquireSRWLockExclusive(&g_typeLock);
 	b.keys += typed;
@@ -2597,6 +3039,7 @@ void __cdecl TabMove(void* user, int pages, int rows, int jump) noexcept {
 
 // The tab came on screen, or left it (its side was closed, or another tab is shown).
 void __cdecl TabShown(void* user, int on) noexcept {
+	g_uiThread.store(GetCurrentThreadId());
 	const TabRef& ref = *static_cast<TabRef*>(user);
 	Book&         b   = *ref.book;
 	if (on == 0) {
@@ -2627,10 +3070,97 @@ int __cdecl TabLeave(void* user) noexcept {
 	return 1;
 }
 
+// The Legend on the other side asks: is a cell being edited (it shows Insert then)?
+int __cdecl TabEditing(void*) noexcept {
+	return LegendCanInsert() ? 1 : 0;
+}
+
+// The Legend's Insert was clicked: its text goes into the cell being edited.
+int __cdecl TabInsert(void*, const char* text) noexcept {
+	if (text == nullptr || !LegendInsert(text)) {
+		return 0;
+	}
+	g_recipeBook.redo.store(true); // the cell editor shows it
+	BookJob(g_ctx, nullptr);
+	return 1;
+}
+
+// ---- the legend as two sections of the Mod Book's Legend (Mod Book 0.8.0 and later)
+//
+// "Recipe codes" (the recipe words, item type, item and property codes) and "Recipe
+// columns" (the columns, op conditions, stat numbers): the entries of legend.txt, read from the
+// first list's bank whenever the Legend asks. Both follow the Cube Recipes tab.
+
+int g_sections[2]     = { 0, 0 }; // their handles; 0: the Mod Book has no Legend (the old legend tabs are used)
+int g_sectionUser[2]  = { 0, 1 };
+
+int __cdecl SectionCount(void* user, int how) noexcept {
+	const int section = *static_cast<int*>(user);
+	if (how == 1) {
+		return static_cast<int>(cube::LegendHow(section).size());
+	}
+	Guard       guard;
+	const Bank* bank = ShownBank();
+	return bank == nullptr ? 0 : static_cast<int>((section == 0 ? bank->legend : bank->legendValues).size());
+}
+
+int __cdecl SectionGet(void* user, int how, int index, modbook::LegendEntry* entry) noexcept {
+	const int section = *static_cast<int*>(user);
+	// the Mod Book copies them when get returns (UI thread only)
+	static std::string code, meaning, detail, insert;
+	if (entry == nullptr || index < 0) {
+		return 0;
+	}
+	if (how == 1) {
+		const std::vector<cube::HowItWorks> how = cube::LegendHow(section);
+		if (static_cast<size_t>(index) >= how.size()) {
+			return 0;
+		}
+		code    = how[static_cast<size_t>(index)].title;
+		detail  = how[static_cast<size_t>(index)].text;
+		meaning = detail.substr(0, detail.find(". ")); // its first sentence: one line
+		meaning = Fit(meaning, 70);
+		insert.clear();
+	} else {
+		Guard       guard;
+		const Bank* bank = ShownBank();
+		if (bank == nullptr) {
+			return 0;
+		}
+		const std::vector<cube::Shown>& all = section == 0 ? bank->legend : bank->legendValues;
+		if (static_cast<size_t>(index) >= all.size()) {
+			return 0;
+		}
+		const cube::Shown& shown = all[static_cast<size_t>(index)];
+		code    = shown.code;
+		meaning = shown.meaning;
+		detail  = shown.meaning.empty() ? shown.detail : shown.meaning + "\n" + shown.detail;
+		insert  = shown.insert;
+	}
+	entry->code    = code.c_str();
+	entry->meaning = meaning.c_str();
+	entry->detail  = detail.c_str();
+	entry->insert  = insert.empty() ? nullptr : insert.c_str();
+	return 1;
+}
+
+// The legend's entries were made again (the tables were read): the Legend reads them afresh.
+void SectionsChanged() {
+	for (const int section : g_sections) {
+		if (g_book != nullptr && section != 0) {
+			g_book->legendChanged(section);
+		}
+	}
+}
+
 void BookToggle(Book& b) {
 	BookSetUp();
 	if (g_book == nullptr) {
 		g_ctx->WriteConsoleMessage(("Live Cube Recipes: no panels - " + g_bookOff).c_str());
+		return;
+	}
+	if (b.legend && g_sections[0] != 0) { // the Mod Book's Legend, on the recipe words (again: closed)
+		g_book->showLegend(g_sections[0], nullptr);
 		return;
 	}
 	g_book->toggle(b.handle[b.legend ? b.tab : 0]);
@@ -2657,15 +3187,28 @@ void BookSetUp() {
 		g_bookOff = "the Mod Book plugin (d2rl-mod-book.dll) is not installed; recipes still work through recipes.txt and the recipes command";
 		return;
 	}
+	// With the Mod Book's Legend (0.8.0 and later) the legend is two sections of it; an older Mod
+	// Book gets the legend's two lists as tabs on the right, as before.
+	const bool        legend   = modbook::HasLegend(g_book);
 	const char* const ids[]    = { "recipes", "legendwords", "legendcolumns" };
 	const char* const titles[] = { "Cube Recipes", "Recipe Words", "Recipe Terms" };
 	const char* const groups[] = { nullptr, "Cube Recipes", "General" }; // the right side's groups; the left side has none
 	bool              ok       = true;
-	for (int i = 0; i < 3; ++i) {
-		const modbook::Tab tab { sizeof(modbook::Tab), i == 0 ? modbook::kLeft : modbook::kRight, ids[i], titles[i], &g_tabRefs[i], TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, groups[i] };
+	for (int i = 0; i < (legend ? 1 : 3); ++i) {
+		const modbook::Tab tab { sizeof(modbook::Tab), i == 0 ? modbook::kLeft : modbook::kRight, ids[i], titles[i], &g_tabRefs[i], TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, groups[i],
+			i == 0 ? TabEditing : nullptr, i == 0 ? TabInsert : nullptr };
 		const int          handle = g_book->addTab(&tab);
 		g_tabRefs[i].book->handle[g_tabRefs[i].tab] = handle;
 		ok                                           = ok && handle != 0;
+	}
+	if (ok && legend) {
+		const char* const sectionIds[]    = { "recipewords", "recipecolumns" };
+		const char* const sectionTitles[] = { "Recipe codes", "Recipe columns" };
+		for (int i = 0; i < 2; ++i) {
+			const modbook::LegendSection section { sizeof(modbook::LegendSection), sectionIds[i], sectionTitles[i], g_recipeBook.handle[0], &g_sectionUser[i], SectionCount, SectionGet };
+			g_sections[i] = g_book->addLegend(&section);
+			ok            = ok && g_sections[i] != 0;
+		}
 	}
 	if (!ok) {
 		g_bookOff = "the Mod Book did not take the tabs (see mod-book.log)";
@@ -2673,7 +3216,8 @@ void BookSetUp() {
 		return;
 	}
 	g_bookOff.clear();
-	LogF("panels: the recipe book and the legend are tabs of the Mod Book (Ctrl+B, Ctrl+L; console commands recipebook and recipelegend)");
+	LogF(legend ? "panels: the recipe book is a tab of the Mod Book, the legend two sections of its Legend (Ctrl+B, Ctrl+L; console commands recipebook and recipelegend)"
+	            : "panels: the recipe book and the legend are tabs of the Mod Book (Ctrl+B, Ctrl+L; console commands recipebook and recipelegend)");
 }
 
 // ---------------------------------------------------------------- console
@@ -2732,11 +3276,47 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 	return &kPluginInfo;
 }
 
+// The sha256 of this DLL's file, as sha256sum prints it ("" when it cannot be read), so the log
+// says which build ran (suite rule, lead-71 2026-11-25).
+std::string OwnSha256(std::wstring& path) {
+	HMODULE self = nullptr;
+	wchar_t name[1024] = {};
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&OwnSha256), &self)
+	    || GetModuleFileNameW(self, name, 1000) == 0) {
+		return "";
+	}
+	path = name;
+	std::string bytes;
+	if (!ReadWhole(path, bytes)) {
+		return "";
+	}
+	BCRYPT_ALG_HANDLE algorithm = nullptr;
+	uint8_t           digest[32] = {};
+	bool              ok         = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0;
+	ok = ok && BCryptHash(algorithm, nullptr, 0, reinterpret_cast<PUCHAR>(bytes.data()), static_cast<ULONG>(bytes.size()), digest, sizeof(digest)) == 0;
+	if (algorithm != nullptr) {
+		BCryptCloseAlgorithmProvider(algorithm, 0);
+	}
+	if (!ok) {
+		return "";
+	}
+	char hex[65] = {};
+	for (int i = 0; i < 32; ++i) {
+		snprintf(hex + i * 2, 3, "%02x", digest[i]);
+	}
+	return hex;
+}
+
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
 	if (context == nullptr || context->GetApi() == nullptr) {
 		return false;
 	}
 	g_ctx = context;
+	{
+		std::wstring      path;
+		const std::string sha = OwnSha256(path);
+		LogF("d2rl-live-cube-recipes.dll %s sha256 %s (%s)", kVersion, sha.empty() ? "unknown (the file could not be read)" : sha.c_str(), Narrow(path).c_str());
+	}
 	LoadConfig();
 	static_cast<void>(context->RegisterConsoleCommand("recipes", OnConsole, "Live Cube Recipes: read your recipe file now and have the cube use it"));
 	if (!g_config.enabled) {

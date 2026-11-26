@@ -368,6 +368,24 @@ static void OverlayChecks() {
 				&& line("ne1") == "ne1  -  Preserved Head | item of type head (Voodoo Heads)" && line("res-cold") == "res-cold  -  (stat coldresist) | property code (the mod columns of a recipe)"
 				&& Search(lines, "voodoo").size() == 2,
 			"legend entries for the panel: %s", line("shld").c_str());
+		{ // the Mod Book's Legend: code, one-line meaning, and what Insert puts into a cell
+			const auto entry = [&](const std::string& code) -> const Shown* {
+				for (const Shown& shown : lines) {
+					if (shown.code == code) {
+						return &shown;
+					}
+				}
+				return nullptr;
+			};
+			const Shown *rar = entry("rar"), *op = entry("op 18"), *stat = entry("stat 370"), *column = entry("op"), *portal = entry("Cow Portal / Pandemonium Portal / Pandemonium Finale Portal / Red Portal");
+			bool oneLine = true;
+			for (const Shown& shown : lines) {
+				oneLine = oneLine && shown.meaning.find('\n') == std::string::npos && shown.code.find('\n') == std::string::npos;
+			}
+			CHECK(rar != nullptr && rar->meaning == "rare (yellow name)" && rar->insert == "rar" && op != nullptr && op->insert == "18" && stat != nullptr && stat->insert == "370" && stat->meaning == "runed"
+					&& column != nullptr && column->insert.empty() && portal != nullptr && portal->insert.empty() && oneLine && LegendHow(0).size() >= 3 && LegendHow(1).size() >= 3,
+				"legend entries carry their code, a one-line meaning and the text Insert puts in (op 18 -> 18, a column's explanation: nothing); both sections have How it works entries");
+		}
 		CHECK(legend.find("  rar     rare (yellow name)") != std::string::npos && legend.find("  useitem   the very item of input 1") != std::string::npos, "legend: the recipe words are explained");
 		CHECK(legend.find("  shld  Any Shield                    a kind of armo (Armor) and seco (Second Hand)\r\n        includes: head\r\n") != std::string::npos
 				&& legend.find("  armo  Armor                         \r\n        includes: head, shld\r\n") != std::string::npos,
@@ -443,6 +461,92 @@ static void OverlayChecks() {
 	CHECK(!nothing.usable && nothing.lines.empty() && !nothing.header.complete && nothing.header.cell.size() == kColumnCount, "an empty file is a sheet with no columns and no lines");
 	const Sheet fresh = ReadSheet(FullHeader() + "\n");
 	CHECK(fresh.usable && fresh.header.known == static_cast<int>(kColumnCount) && fresh.header.description == 0, "the first line written into a new file has every column");
+
+	// a mod with a code and no amount (the user's "Small Charm <- smca", 2026-11-25: mod 1 vit-str, min/max/param blank)
+	{
+		for (size_t c = 0; c < kColumnCount; ++c) {
+			if (kColumns[c].kind == Kind::Mod) {
+				const std::string mod = kColumns[c].name;
+				CHECK(c + 4 < kColumnCount && kColumns[c + 2].name == mod + " param" && kColumns[c + 3].name == mod + " min" && kColumns[c + 4].name == mod + " max",
+					"columns: %s is followed by its chance, param, min and max (AmountNotes counts on it)", mod.c_str());
+			}
+		}
+		const Header h = ReadHeader("description\tenabled\tnuminputs\tinput 1\toutput\tmod 1\tmod 1 param\tmod 1 min\tmod 1 max\tb mod 2\tb mod 2 min\tb mod 2 max\t*eol");
+		const std::vector<std::string> none   = AmountNotes(h, "Small Charm <- smca\t1\t1\tcm1\tcm1\tvit-str\t\t\t\t\t\t\t0\r");
+		const std::vector<std::string> both   = AmountNotes(h, "x\t1\t1\tcm1\tcm1\tvit-str\t\t \t\tstr\t\t\t0");
+		const std::vector<std::string> fine   = AmountNotes(h, "x\t1\t1\tcm1\tcm1\tvit-str\t\t3\t3\tstr\t0\t0\t0");
+		const std::vector<std::string> param  = AmountNotes(h, "x\t1\t1\tcm1\tcm1\tstr/lvl\t8\t\t\t\t\t\t0");
+		const std::vector<std::string> noMods = AmountNotes(h, "x\t1\t1\tcm1\tcm1");
+		CHECK(none.size() == 1 && none[0].find("mod 1 vit-str has no amount") == 0 && none[0].find("Put the amount in mod 1 min and mod 1 max") != std::string::npos
+				&& both.size() == 2 && both[1].find("b mod 2 str has no amount") == 0 && fine.empty() && param.empty() && noMods.empty(),
+			"a mod with a code and blank min, max and param is noted (it gives 0); a 0 typed, a min/max or a param (str/lvl) is not");
+		// the same through the list builder: the line is taken, with the note
+		struct NoGame : Game {
+			bool     Input(char*, uint8_t*, int, int) override { return true; }
+			bool     Output(char*, uint8_t*, int, int) override { return true; }
+			bool     Mod(const char*, uint8_t* row, size_t at) override { row[at] = 7; row[at + 1] = row[at + 2] = row[at + 3] = 0; return true; }
+			int      Class(const char*) override { return -1; }
+			uint32_t Param(const char*) override { return 0; }
+		} game;
+		Cache         cache;
+		const Sheet   sheet = ReadSheet("description\tenabled\tnuminputs\tinput 1\toutput\tmod 1\tmod 1 min\tmod 1 max\t*eol\nSmall Charm <- smca\t1\t1\tcm1\tcm1\tvit-str\t\t\t0\ngood\t1\t1\tcm2\tcm2\tvit-str\t3\t3\t0\n");
+		const Outcome out   = ExactList(game, kWide, sheet, cache, nullptr, 0);
+		CHECK(out.added == 2 && out.refused == 0 && out.notes.size() == 1 && out.notes[0].find("Small Charm <- smca") != std::string::npos && out.notes[0].find("mod 1 vit-str has no amount") != std::string::npos,
+			"ExactList takes the line without an amount and notes it, naming the line");
+	}
+
+	// NamesRow: which cell of a record names a row Live Tables is asked to remove (or one after it)
+	{
+		std::vector<uint8_t> row(kWideRow, 0);
+		for (size_t c = 0; c < kColumnCount; ++c) {
+			if (kColumns[c].kind == Kind::Mod) {
+				memset(row.data() + Offset(kWide, kColumns[c].at), 0xff, 4);
+			}
+		}
+		const auto put = [&](size_t at, uint32_t value) { memcpy(row.data() + Offset(kWide, at), &value, 4); };
+		const bool blank = NamesRow(kWide, row.data(), false, 0) < 0 && NamesRow(kWide, row.data(), true, 0) < 0;
+		put(0x75, 304); // mod 2
+		const int  mod2   = NamesRow(kWide, row.data(), false, 304);
+		const bool later  = NamesRow(kWide, row.data(), false, 200) == mod2 && NamesRow(kWide, row.data(), false, 305) < 0;
+		put(0x75, 304 | (1u << 16)); // a property group, not a property
+		const bool group  = NamesRow(kWide, row.data(), false, 0) < 0;
+		put(0x4, 389); // param: a stat only with an op
+		const bool noOp   = NamesRow(kWide, row.data(), true, 389) < 0;
+		row[0x3]          = 28; // quest difficulty: param is no stat
+		const bool op28   = NamesRow(kWide, row.data(), true, 0) < 0;
+		row[0x3]          = 18;
+		const int  param  = NamesRow(kWide, row.data(), true, 389);
+		CHECK(blank && mod2 >= 0 && std::string(kColumns[mod2].name) == "mod 2" && later && group && noOp && op28 && param >= 0 && std::string(kColumns[param].name) == "param" && NamesRow(kWide, row.data(), true, 390) < 0,
+			"NamesRow: a mod cell naming the property (or a later one), not a group; a param naming the stat only with op 3-26 (not op 28)");
+	}
+
+	// RenameInText / RenameInCells: a code Live Tables renamed follows in the recipe text
+	{
+		std::string text = "description\top\tparam\tmod 1\tmod 1 min\tb mod 3\tinput 1\t*eol\r\n"
+		                   "a\t18\tStat477\tvit-str\t3\t VIT-STR \tvit-str\t0\r\n"
+		                   "b\t\t\tvit-strx\t1\t\t\t0\r\n";
+		std::vector<std::string> where;
+		const std::string before = text;
+		const int props = RenameInText(text, false, "vit-str", "vit-str2", &where);
+		const bool propsOk = props == 2 && text == "description\top\tparam\tmod 1\tmod 1 min\tb mod 3\tinput 1\t*eol\r\n"
+		                                           "a\t18\tStat477\tvit-str2\t3\tvit-str2\tvit-str\t0\r\n"
+		                                           "b\t\t\tvit-strx\t1\t\t\t0\r\n"
+			&& where.size() == 2 && where[0] == "line 2 (a) mod 1" && where[1] == "line 2 (a) b mod 3";
+		const int stats = RenameInText(text, true, "stat477", "life_per_vit", nullptr);
+		const bool statsOk = stats == 1 && text.find("\t18\tlife_per_vit\tvit-str2\t") != std::string::npos;
+		std::string same = before;
+		const bool none = RenameInText(same, false, "nope", "x", nullptr) == 0 && same == before;
+		Cells cells;
+		cells.cell.assign(kColumnCount, "");
+		for (size_t c = 0; c < kColumnCount; ++c) {
+			if (std::string(kColumns[c].name) == "mod 2" || std::string(kColumns[c].name) == "input 1") {
+				cells.cell[c] = "vit-str";
+			}
+		}
+		const int  inCells = RenameInCells(cells, false, "vit-str", "vit-str2");
+		CHECK(propsOk && statsOk && none && inCells == 1,
+			"a rename rewrites only the mod cells (property) or the param cell (stat) that name the old code, any case, and keeps every other byte (line ends too)");
+	}
 
 	// offsets of the wide record
 	CHECK(Offset(kWide, 0x4b) == 0x4b && Offset(kWide, 0x5a) == 0x68 && Offset(kWide, 0xb3) == 0xc3 && Offset(kWide, 0x153) == 0x165, "offsets move the way D2RLoader moves them");

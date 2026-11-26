@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. A copy of the stat-edits.txt of the 2026-11-25 game folder (made 2026-11-23), for test/table_test.cpp.
+# Live Properties: the stat rows that were changed or made in the Stats tab.
+# stat number, then signed, send bits, save bits, save add, val shift, desc priority, desc func, desc val, desc str pos, desc str neg, op, op param, op base, op stat 1, op stat 2, op stat 3, the plugin's name for a made stat, the game's name for the row (- = nothing). Tabs between.
+# Written by the plugin. Read when the game has read its tables. Delete a line to get the game's own row back.
+477	1	13	13	-	-	-	-	-	5382	5382	-	-	-	-	-	-	stat477	xlt_unused_477
+478	1	13	13	-	-	-	-	-	5382	5382	-	-	-	-	-	-	stat478	xlt_unused_478

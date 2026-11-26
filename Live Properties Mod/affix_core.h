@@ -20,6 +20,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace affix {
 
@@ -41,12 +42,12 @@ using Cells = std::array<std::string, kCells>;
 
 // What the plugin knows about the game's names: property codes and item type codes by row.
 // Empty cells hold what the game's own empty cells hold (learnt from the table: Learn).
+// The lists are held by pointer to the vector, not to its first element: a list read again (the
+// property names after Live Tables grew the table) may move its elements, never the vector.
 struct Names {
-	const std::string* props     = nullptr; // property code by row ("" = none)
-	size_t             propCount = 0;
-	const std::string* types     = nullptr; // item type code by row
-	size_t             typeCount = 0;
-	long               noProp = -1, noType = 0; // what an empty mod code / item type cell holds
+	const std::vector<std::string>* props = nullptr; // property code by row ("" = none)
+	const std::vector<std::string>* types = nullptr; // item type code by row
+	long                            noProp = -1, noType = 0; // what an empty mod code / item type cell holds
 };
 
 long  Get(const uint8_t* row, const Field& field);
@@ -55,6 +56,18 @@ Cells Read(const uint8_t* row, const Names& names);
 // The cells (the name cell aside: the plugin puts the name) into `next`, a copy of the row.
 // Everything is checked first; on false `next` may be half written and `problem` says why.
 bool Build(const Cells& cells, const Names& names, uint8_t* next, std::string& problem);
+// Disabled (affix-off.txt): spawnable 0 and frequency 0 - it rolls on no drop and a recipe's
+// pre= / suf= cannot force it (the game takes only spawnable rows with a frequency); items that have
+// it keep it. Enable puts both cells back from `from` (the edited row, or the game's own).
+// The classic block of one kind's rows (as the game holds them: the file's Expansion line dropped):
+// the place of its first row with version (+0x22) 1 or more. Saved ids after it are the place + 1
+// (proven on the user's saves); before it they are held back until confirmed (prop affixtest).
+size_t ClassicEnd(const uint8_t* rows, size_t count);
+
+void Off(uint8_t* row);
+bool IsOff(const uint8_t* row);
+void On(uint8_t* row, const uint8_t* from);
+
 // A row no affix uses: no name and no mod.
 bool IsBlank(const uint8_t* row, const Names& names);
 // What the game's empty cells hold, from the rows of a table: the most common mod 3 code and

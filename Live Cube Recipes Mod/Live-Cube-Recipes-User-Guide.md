@@ -130,7 +130,7 @@ this recipe has filled in. **All cells** shows every cell; **Fewer cells** goes 
 - **Click a legend entry** (open the legend with Ctrl+L) to put its code into the cell you are
   in: look up `thul`, click it, and `r10` is in the cell. In input and output cells the code is
   added after a comma (`shld` then `rar` gives `shld,rar`); other cells take the code as their
-  whole content. From the legend's second tab only `op` and `stat` entries put something in:
+  whole content. In the Recipe columns section only `op` and `stat` entries put something in:
   their number.
 - The wheel and Page Up / Page Down scroll the cells.
 - **Enter** is Done. **Ctrl+S** is Done and Save in one.
@@ -156,7 +156,7 @@ can see the result, but they are only in the book.
 
 While there are changes not saved, the top of the list shows:
 
-- **Save N changes**: writes the list to `recipes.txt`. The cube uses it at once.
+- **Save (N)** (N = the changes not saved yet): writes the list to `recipes.txt`. The cube uses it at once.
 - **Discard**: forgets them.
 - **Undo** (beside the search box, or Ctrl+Z): takes back the last change only: an edit, a new
   recipe, a removal, a disable, a search or restore, a loaded template. Press it again for the
@@ -211,7 +211,7 @@ book.
 
 | Choice | What it does |
 |---|---|
-| **Save the list in the book as a template** | Asks for a name (letters, digits, spaces, `-` and `_`) and keeps the list as it is in the book right now, unsaved changes included. A template of the same name is replaced. |
+| **Save this list as a template** | Asks for a name (letters, digits, spaces, `-` and `_`) and keeps the list as it is in the book right now, unsaved changes included. A template of the same name is replaced. |
 | **Load** | Asks first. Then the template's list takes the place of the list in the book. The cube has it once you save. |
 | **Delete** | Asks first. Then the template's file is removed. The book and the cube are not touched. |
 
@@ -221,20 +221,21 @@ Templates are files in the `templates` folder (section 10); you can copy them to
 
 ## 8. The legend
 
-Press **Ctrl+L** in a game. A panel opens on the right, opposite the recipe book, that explains what
-the words, codes and numbers in recipes mean. It works like the recipe book: type to search, wheel
-or Page Up / Page Down to turn pages, hold the cursor over an entry to see it whole.
+Press **Ctrl+L** in a game. The Mod Book's Legend opens on the right, opposite the recipe book, on
+the recipe sections. They explain what the words, codes and numbers in recipes mean. Type to
+search; the wheel or Page Up / Page Down turn pages. Each row is one line; the longer explanations
+are the **How it works** entries at the top of each section.
 
-It has two tabs, picked at the top:
+It has two sections:
 
-**Words and codes**
+**Recipe codes**
 
 - the words of input and output cells: `rar` = rare, `nor` = normal, `qty=3`, `useitem` ...
 - item type codes: `shld` = Any Shield, `tors` = body armor ...
 - item codes: `r10` = Thul Rune ...
 - property codes, used in the `mod` cells: `res-cold` ...
 
-**Columns and values**
+**Recipe columns**
 
 - every column of a recipe and what its values mean
 - every `op` number, and what `param` and `value` are for it
@@ -314,7 +315,7 @@ Each output can be given up to five properties: `mod 1` to `mod 5` for `output`,
 | `min diff` | 0 = every difficulty, 1 = Nightmare and Hell, 2 = Hell only |
 | `version` | 0 = also classic characters, 100 = expansion characters only |
 | `class` | a class code (`ama`, `sor`, `nec`, `pal`, `bar`, `dru`, `ass`, `war`): only that class |
-| `op`, `param`, `value` | one extra condition. `op` is a number that says which kind; the legend's second tab lists all of them. |
+| `op`, `param`, `value` | one extra condition. `op` is a number that says which kind; the legend's Recipe columns section lists all of them. |
 
 Example of `op`: `op` 18, `param` 370, `value` 0 means "stat number 370 of the item put in must be 0".
 
@@ -439,7 +440,7 @@ Diablo II Resurrected/d2rloader/logs/live-cube-recipes.log
 |---|---|
 | Ctrl+B does nothing | Type `recipebook` in the console; if the panel cannot be made it says why. The log line starting `panels:` has the details. |
 | "the game does not know ..." | An item code, item type or name in that cell does not exist in the mod. Look it up in the legend. |
-| "... is not a property code" | The code in a `mod` cell does not exist. The legend's first tab lists the property codes. |
+| "... is not a property code" | The code in a `mod` cell does not exist. The legend's Recipe codes section lists the property codes. |
 | A recipe is in the book but the cube does not use it | Is it switched off (`(not enabled)`)? Does `numinputs` equal the number of items? Is there an `op` condition? Is another recipe above it that fits the same items? |
 | A recipe the mod has is missing from the cube | Your list does not have it. Press **Search for new recipes**, or **Restore deleted defaults** if you removed it. |
 | You want the game's recipes back as they were | Save the list as a template if you want to keep it; then remove every line but the first from `recipes.txt` and type `recipes`. A list without recipes always means the defaults. |

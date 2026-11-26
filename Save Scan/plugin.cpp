@@ -12,15 +12,24 @@
 //       savescan dump            writes d2rloader\save-scan\<mod>\items.txt (all items, all stats,
 //                                and for each stat the properties that name it)
 //
-// Saves are opened for reading only. The stat table is the one the game holds in memory at
+//   * savescan remove <stat>   a DRY RUN of fixSaves for "this middle row removed, every later stat
+//                              one down": what would change in each file, into the plugin log
+//
+// scan and dump open saves for reading only. fixSaves (save_scan_api.h; fix_core.cpp) rewrites
+// them on another plugin's request, after a dated backup, never while a character is in a game.
+// The stat table is the one the game holds in memory at
 // the moment of the call (so stats changed or made at run time are read as the game saves
 // them); the item tables (armor, weapons, misc) are read from the mod's text files.
 // The reader itself is save_core.cpp.
 
 #include <D2RLPlugin/api.h>
 
+#include "fix_core.h"
 #include "save_core.h"
 #include "save_scan_api.h"
+#include "../Mod Book/mod_book_api.h"
+
+#include <bcrypt.h>
 
 #include <windows.h>
 
@@ -28,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <set>
 #include <string>
@@ -35,7 +45,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.2.0";
+constexpr const char* kVersion = "0.3.4";
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -347,7 +357,7 @@ SRWLOCK g_lock = SRWLOCK_INIT; // one scan at a time
 // The stat tables the game holds, newest data version first. Each is checked: a few stats whose
 // saved shape every version of the game has must read as they should - else the row layout is
 // not the one the plugin knows, and nothing is read with it.
-bool GameTables(uintptr_t base, savescan::Tables shapes[3], int versions[3], int& count, Scan& scan, std::string& problem) {
+bool GameTables(uintptr_t base, savescan::Tables shapes[3], int versions[3], int& count, Scan& scan, std::string& problem, bool names = true) {
 	const auto getter = reinterpret_cast<void* (*)(uint8_t)>(base + kTablesRva);
 	count             = 0;
 	for (int version = 3; version >= 1; --version) {
@@ -370,7 +380,7 @@ bool GameTables(uintptr_t base, savescan::Tables shapes[3], int versions[3], int
 			problem = text;
 			return false;
 		}
-		if (count == 0) { // names and properties for the dump, from the newest
+		if (count == 0 && names) { // names and properties for the dump, from the newest
 			WalkNames(tables, kStatNamesAt, stats->count, scan.statNames);
 			const auto* props = reinterpret_cast<const Vector*>(tables + kPropsAt);
 			if (Readable(props, sizeof(Vector)) && props->count > 0 && props->count < 0x7000 && Readable(props->rows, props->count * kPropRow)) {
@@ -539,6 +549,41 @@ int __cdecl ApiScan(const uint16_t* stats, uint32_t count, savescan::Summary* su
 	return static_cast<int>(summary->ran);
 }
 
+int __cdecl ApiScanAffixes(const savescan::AffixId* ids, uint32_t count, savescan::Summary* summary, savescan::AffixHitFn hit, savescan::ProblemFn problem, void* user) noexcept {
+	if (g_ctx == nullptr || summary == nullptr || summary->size < sizeof(savescan::Summary) || (count != 0 && ids == nullptr)) {
+		return 0;
+	}
+	AcquireSRWLockExclusive(&g_lock);
+	const Scan scan = Run();
+	Count(scan, *summary);
+	std::set<uint32_t> wanted;
+	for (uint32_t i = 0; i < count; ++i) {
+		wanted.insert(static_cast<uint32_t>(ids[i].suffix & 1) << 16 | ids[i].id);
+	}
+	for (const Looked& file : scan.files) {
+		for (const savescan::Item& item : file.result.items) {
+			bool holds = false;
+			for (const savescan::AffixSlot& slot : item.affixes) {
+				if (slot.id == 0 || wanted.count(static_cast<uint32_t>(slot.suffix) << 16 | slot.id) == 0) {
+					continue;
+				}
+				holds = true;
+				if (hit != nullptr) {
+					const std::string        where = savescan::Where(item);
+					const savescan::AffixHit one { sizeof(savescan::AffixHit), file.name.c_str(), where.c_str(), item.code.c_str(), slot.suffix, slot.slot, item.quality, slot.id, item.offset };
+					hit(user, &one);
+				}
+			}
+			summary->holders += holds ? 1 : 0;
+		}
+	}
+	Problems(scan, problem, user);
+	LogF("affix scan for %u id%s: %s, %u files (%u unreadable), %u items, %u carry one", count, count == 1 ? "" : "s", scan.ran ? "done" : ("could not run - " + scan.problem).c_str(), summary->files, summary->unreadable,
+		summary->items, summary->holders);
+	ReleaseSRWLockExclusive(&g_lock);
+	return static_cast<int>(summary->ran);
+}
+
 const char* const kQualities[] = { "", "low", "normal", "superior", "magic", "set", "rare", "unique", "crafted" };
 
 std::string DumpText(const Scan& scan) {
@@ -630,7 +675,662 @@ int __cdecl ApiDump(char* path, uint32_t pathSize, savescan::Summary* summary, s
 	return done;
 }
 
-constexpr savescan::Api kApi { sizeof(savescan::Api), savescan::kApiVersion, ApiScan, ApiDump };
+
+// ---------------------------------------------------------------- the save writer (fixSaves)
+
+// Is a character in a game? D2RCore's IsInGame. -1: cannot tell.
+int InGame() {
+	const HMODULE core = GetModuleHandleW(L"D2RCore.dll");
+	const auto    fn   = core != nullptr ? reinterpret_cast<bool(__cdecl*)()>(reinterpret_cast<void*>(GetProcAddress(core, "IsInGame"))) : nullptr;
+	return fn == nullptr ? -1 : fn() ? 1 : 0;
+}
+
+std::wstring Stamp() {
+	wchar_t    text[32];
+	const time_t now = time(nullptr);
+	tm         local {};
+	localtime_s(&local, &now);
+	wcsftime(text, 32, L"%Y%m%d-%H%M%S", &local);
+	return text;
+}
+
+// The disk, for fix_core: the save folder and Save Scan's own folder (for the backup).
+struct WinIo : savescan::FixIo {
+	std::wstring saves, own, backupFolder;
+	bool backup(const std::vector<savescan::FixInput>& files, std::string& folder, std::string& why) override {
+		MakeFolders(own);
+		backupFolder = own + L"\\backup-" + Stamp();
+		if (GetFileAttributesW(backupFolder.c_str()) != INVALID_FILE_ATTRIBUTES || !CreateDirectoryW(backupFolder.c_str(), nullptr)) {
+			why = "the backup folder " + Narrow(backupFolder) + " could not be made new";
+			return false;
+		}
+		std::string list = "Save Scan backup, made before rewriting saves. Each file here came from:\r\n";
+		for (const savescan::FixInput& file : files) {
+			const std::wstring copy = backupFolder + L"\\" + Widen(file.name);
+			std::string        back;
+			if (!WriteOwn(copy, file.bytes) || !ReadWhole(copy, back) || back != file.bytes) {
+				why = "the backup of " + file.name + " could not be written and read back";
+				return false;
+			}
+			list += file.name + "\t" + Narrow(saves) + "\\" + file.name + "\r\n";
+		}
+		WriteOwn(backupFolder + L"\\where-each-file-came-from.txt", list);
+		folder = Narrow(backupFolder);
+		return true;
+	}
+	bool write(const std::string& name, const std::string& bytes, std::string& why) override {
+		const std::wstring path = saves + L"\\" + Widen(name), temp = path + L".save-scan-writing";
+		const HANDLE       file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (file == INVALID_HANDLE_VALUE) {
+			why = "error " + std::to_string(GetLastError()) + " making " + Narrow(temp);
+			return false;
+		}
+		DWORD      written = 0;
+		const bool ok      = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) && written == bytes.size() && FlushFileBuffers(file);
+		CloseHandle(file);
+		if (!ok || !MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+			why = "error " + std::to_string(GetLastError()) + " writing " + name;
+			DeleteFileW(temp.c_str());
+			return false;
+		}
+		return true;
+	}
+	bool read(const std::string& name, std::string& bytes) override { return ReadWhole(saves + L"\\" + Widen(name), bytes); }
+	bool mayWrite(std::string& why) override {
+		const int inGame = InGame();
+		if (inGame != 0) {
+			why = inGame > 0 ? "a character went into a game (the game holds that character and its stash)" : "it cannot be told whether a character is in a game";
+			return false;
+		}
+		return true;
+	}
+	bool planned(const std::vector<savescan::RestoreEntry>& plan, std::string& why) override {
+		std::string text = "# Save Scan: the files this fix writes (name, size and FNV-1a hash of what is written). restore() puts back only these.\r\n";
+		for (const savescan::RestoreEntry& entry : plan) {
+			char line[400];
+			snprintf(line, sizeof(line), "%s\t%llu\t%016llx\r\n", entry.name.c_str(), static_cast<unsigned long long>(entry.writtenSize), static_cast<unsigned long long>(entry.writtenHash));
+			text += line;
+		}
+		std::string back;
+		if (!WriteOwn(backupFolder + L"\\written.txt", text) || !ReadWhole(backupFolder + L"\\written.txt", back) || back != text) {
+			why = "written.txt could not be written into " + Narrow(backupFolder);
+			return false;
+		}
+		return true;
+	}
+};
+
+struct FixJob {
+	savescan::FixRequest              request {};
+	std::vector<savescan::ChangeSpec> changes;
+	std::vector<savescan::ResizeSpec> resizes, before;
+	std::vector<savescan::AffixSpec>  affixes;
+	int64_t                           notAfter = 0;
+	savescan::Tables                  shapes[3];
+	int                               versions[3] = {}, count = 0;
+	std::string                       refusal; // refused at the call: said in done() only
+	std::wstring                      saves, own;
+	savescan::FixDone*                now = nullptr; // fixSavesNow / restore: the caller's answer
+};
+
+volatile LONG g_fixBusy   = 0;
+HANDLE        g_fixThread = nullptr;
+std::string   g_nowBackup, g_nowWhy; // the strings of the last fixSavesNow / restore answer
+
+const char* StateName(savescan::FixState state) {
+	switch (state) {
+	case savescan::FixState::Unchanged: return "unchanged";
+	case savescan::FixState::Written: return "WRITTEN and checked";
+	case savescan::FixState::WouldWrite: return "would be rewritten";
+	case savescan::FixState::Refused: return "REFUSED";
+	case savescan::FixState::Restored: return "PUT BACK";
+	case savescan::FixState::Held: return "held by the game";
+	}
+	return "?";
+}
+
+// The FixDone of a result; into the caller's struct as far as its size goes.
+void Answer(const savescan::FixOut& out, savescan::FixDone* now, savescan::DoneFn done, void* user) {
+	const savescan::FixDone d { sizeof(savescan::FixDone), out.ok ? 1 : 0, out.dryRun ? 1 : 0, static_cast<uint32_t>(out.files.size()), out.changed, out.itemsChanged, out.dropped, out.renumbered, out.resized, out.unreadable,
+		out.restored, out.notRestored, nullptr, nullptr, out.affixesRenumbered, out.affixesDropped };
+	if (now != nullptr) {
+		g_nowBackup = out.backup;
+		g_nowWhy    = out.why;
+		savescan::FixDone copy = d;
+		copy.backup            = g_nowBackup.c_str();
+		copy.why               = g_nowWhy.c_str();
+		const uint32_t size    = now->size < sizeof(copy) ? now->size : static_cast<uint32_t>(sizeof(copy));
+		copy.size              = size;
+		memcpy(now, &copy, size);
+	}
+	if (done != nullptr) {
+		savescan::FixDone call = d;
+		call.backup            = out.backup.c_str();
+		call.why               = out.why.c_str();
+		done(user, &call);
+	}
+}
+
+void Finish(FixJob& job, savescan::FixOut& out) {
+	const bool dry = (job.request.flags & savescan::kDryRun) != 0;
+	out.dryRun     = dry;
+	std::string report;
+	for (const savescan::FixFileOut& file : out.files) {
+		char line[700];
+		snprintf(line, sizeof(line), "  %s: %s, %u items, %u changed (%u dropped, %u renumbered, %u re-encoded; affixes %u renumbered, %u dropped), %d -> %d bytes%s%s", file.name.c_str(), StateName(file.state), file.items,
+			file.itemsChanged, file.dropped, file.renumbered, file.resized, file.affixesRenumbered, file.affixesDropped, file.bytesBefore, file.bytesAfter, file.why.empty() ? "" : " - ", file.why.c_str());
+		LogF("%s", line);
+		report += std::string(line) + "\r\n";
+		if (!file.note.empty()) {
+			LogF("    %s", file.note.c_str());
+			report += "    " + file.note + "\r\n";
+		}
+		if (job.request.file != nullptr) {
+			const savescan::FileReport one { sizeof(savescan::FileReport), file.name.c_str(), static_cast<savescan::FileState>(file.state), file.items, file.itemsChanged, file.dropped, file.renumbered, file.resized,
+				file.bytesBefore, file.bytesAfter, file.why.c_str(), file.note.c_str(), file.affixesRenumbered, file.affixesDropped };
+			job.request.file(job.request.user, &one);
+		}
+	}
+	LogF("fixSaves%s: %s - %u files, %u changed, %u items, %u dropped, %u renumbered, %u re-encoded, affixes %u/%u, %u unreadable, %u put back%s%s%s%s", dry ? " (dry run)" : "", out.ok ? "ok" : "NOT DONE",
+		static_cast<unsigned>(out.files.size()), out.changed, out.itemsChanged, out.dropped, out.renumbered, out.resized, out.affixesRenumbered, out.affixesDropped, out.unreadable, out.restored, out.why.empty() ? "" : " - ",
+		out.why.c_str(), out.backup.empty() ? "" : "; backup ", out.backup.c_str());
+	if (!out.backup.empty()) { // report.txt marks the fix as finished (the start-up check looks for a plan without it)
+		WriteOwn(Widen(out.backup) + L"\\report.txt", std::string(out.ok ? "Done: every changed file was written, read back and checked.\r\n" : "NOT DONE: ") + (out.ok ? "" : out.why + "\r\n") + report);
+	}
+	Answer(out, job.now, job.request.done, job.request.user);
+}
+
+// The work of a fix, on whatever thread runs it (never waits for another thread).
+void Execute(FixJob& job) {
+	savescan::FixOut out;
+	if (!job.refusal.empty()) {
+		out.why = job.refusal;
+		Finish(job, out);
+		return;
+	}
+	std::string problem;
+	if (!ItemTables(job.shapes[0], problem)) {
+		out.why = "Nothing was written: " + problem + ".";
+		Finish(job, out);
+		return;
+	}
+	for (int i = 1; i < job.count; ++i) {
+		job.shapes[i].items = job.shapes[0].items;
+	}
+	std::vector<savescan::FixInput> files;
+	for (const wchar_t* pattern : { L"\\*.d2s", L"\\*.d2i" }) {
+		WIN32_FIND_DATAW entry {};
+		const HANDLE     find = FindFirstFileW((job.saves + pattern).c_str(), &entry);
+		if (find == INVALID_HANDLE_VALUE) {
+			continue;
+		}
+		do {
+			if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+				continue;
+			}
+			savescan::FixInput file;
+			file.name  = Narrow(entry.cFileName);
+			file.stash = pattern[3] == L'd' && pattern[5] == L'i';
+			const uint64_t ticks = static_cast<uint64_t>(entry.ftLastWriteTime.dwHighDateTime) << 32 | entry.ftLastWriteTime.dwLowDateTime;
+			file.writeTime       = ticks > 116444736000000000ull ? static_cast<int64_t>((ticks - 116444736000000000ull) / 10000000ull) : 0;
+			if (ReadWhole(job.saves + L"\\" + entry.cFileName, file.bytes)) {
+				file.tables = &job.shapes[0];
+				for (int i = 0; i < job.count; ++i) { // the data version whose table reads it
+					const auto* data = reinterpret_cast<const uint8_t*>(file.bytes.data());
+					if ((file.stash ? savescan::ReadStash(data, file.bytes.size(), job.shapes[i]) : savescan::ReadCharacter(data, file.bytes.size(), job.shapes[i])).ok) {
+						file.tables = &job.shapes[i];
+						break;
+					}
+				}
+			}
+			files.push_back(std::move(file));
+		} while (FindNextFileW(find, &entry) != 0);
+		FindClose(find);
+	}
+	WinIo io;
+	io.saves = job.saves;
+	io.own   = job.own;
+	out      = savescan::Fix(files, job.changes, job.resizes, (job.request.flags & savescan::kDryRun) != 0, io, job.affixes, job.notAfter);
+	Finish(job, out);
+}
+
+DWORD WINAPI FixThread(void* parameter) {
+	FixJob* job = static_cast<FixJob*>(parameter);
+	Execute(*job);
+	delete job;
+	InterlockedExchange(&g_fixBusy, 0);
+	return 0;
+}
+
+// The request, copied and checked on the caller's thread (with the game's stat table). nullptr: bad arguments.
+FixJob* Prepare(const savescan::FixRequest* request) {
+	if (g_ctx == nullptr || request == nullptr || request->size < offsetof(savescan::FixRequest, affixChanges)) {
+		return nullptr;
+	}
+	auto* job = new FixJob;
+	memcpy(&job->request, request, request->size < sizeof(savescan::FixRequest) ? request->size : sizeof(savescan::FixRequest));
+	if (request->size < offsetof(savescan::FixRequest, before)) {
+		job->request.affixChanges     = nullptr;
+		job->request.affixChangeCount = 0;
+	}
+	if (request->size < sizeof(savescan::FixRequest)) {
+		job->request.before      = nullptr;
+		job->request.beforeCount = 0;
+		job->request.notAfter    = 0;
+	}
+	const savescan::FixRequest& r = job->request;
+	if ((r.changeCount != 0 && r.changes == nullptr) || (r.affixChangeCount != 0 && r.affixChanges == nullptr) || (r.beforeCount != 0 && r.before == nullptr) || (r.resizeCount != 0 && r.resizes == nullptr)) {
+		job->refusal = "A change list is missing (its count is not 0): nothing was written.";
+	}
+	for (uint32_t i = 0; job->refusal.empty() && i < r.changeCount; ++i) {
+		job->changes.push_back({ r.changes[i].from, r.changes[i].to });
+	}
+	for (uint32_t i = 0; job->refusal.empty() && i < r.resizeCount; ++i) {
+		job->resizes.push_back({ r.resizes[i].stat, r.resizes[i].saveBits, r.resizes[i].paramBits, r.resizes[i].saveAdd });
+	}
+	for (uint32_t i = 0; job->refusal.empty() && i < r.affixChangeCount; ++i) {
+		job->affixes.push_back({ r.affixChanges[i].suffix, r.affixChanges[i].from, r.affixChanges[i].to });
+	}
+	for (uint32_t i = 0; job->refusal.empty() && i < r.beforeCount; ++i) {
+		job->before.push_back({ r.before[i].stat, r.before[i].saveBits, r.before[i].paramBits, r.before[i].saveAdd });
+	}
+	job->notAfter = r.notAfter;
+	const bool dry = (r.flags & savescan::kDryRun) != 0;
+	if (job->refusal.empty() && !dry) {
+		const int inGame = InGame();
+		if (inGame != 0) {
+			job->refusal = inGame > 0 ? "A character is in a game: leave to the main menu to fix the saves (the game holds that character and its stash). Nothing was written."
+			                          : "Save Scan cannot tell whether a character is in a game (D2RCore's IsInGame was not found), so it writes nothing.";
+		}
+	}
+	if (job->refusal.empty()) {
+		uintptr_t   base = 0;
+		Scan        unused;
+		std::string problem;
+		if (!GameKnown(base, problem) || !GameTables(base, job->shapes, job->versions, job->count, unused, problem, false)) {
+			job->refusal = "The game's stat table could not be read (" + problem + "). Nothing was written.";
+		}
+		for (int i = 0; job->refusal.empty() && i < job->count; ++i) {
+			if (!savescan::ApplyBefore(job->shapes[i], job->before, problem)) {
+				job->refusal = "Nothing was written: " + problem + ".";
+			}
+		}
+	}
+	job->saves = SaveFolder();
+	job->own   = OwnFolder();
+	if (job->refusal.empty() && !IsDirectory(job->saves)) {
+		job->refusal = "The save folder was not found (" + Narrow(job->saves) + "). Nothing was written.";
+	}
+	LogF("fix%s: %u stat changes, %u new shapes, %u affix changes, %u before shapes%s", dry ? " (dry run)" : "", r.changeCount, r.resizeCount, r.affixChangeCount, r.beforeCount, job->refusal.empty() ? "" : (" - REFUSED: " + job->refusal).c_str());
+	return job;
+}
+
+constexpr const char* kBusy = "Save Scan is busy with another fix of the saves: try again when it is done. Nothing was written.";
+
+int __cdecl ApiFixSaves(const savescan::FixRequest* request) noexcept {
+	if (request == nullptr || request->done == nullptr) {
+		return 0;
+	}
+	FixJob* job = Prepare(request);
+	if (job == nullptr) {
+		return 0;
+	}
+	if (InterlockedCompareExchange(&g_fixBusy, 1, 0) != 0) { // say so from a thread of its own (done() never comes on the caller's thread)
+		job->refusal        = kBusy;
+		const HANDLE thread = CreateThread(nullptr, 0, [](void* p) -> DWORD {
+			FixJob* j = static_cast<FixJob*>(p);
+			Execute(*j);
+			delete j;
+			return 0;
+		}, job, 0, nullptr);
+		if (thread == nullptr) {
+			delete job;
+			return 0;
+		}
+		CloseHandle(thread);
+		return 1;
+	}
+	if (g_fixThread != nullptr) {
+		CloseHandle(g_fixThread);
+	}
+	g_fixThread = CreateThread(nullptr, 0, FixThread, job, 0, nullptr);
+	if (g_fixThread == nullptr) {
+		delete job;
+		InterlockedExchange(&g_fixBusy, 0);
+		return 0;
+	}
+	return 1;
+}
+
+int __cdecl ApiFixSavesNow(const savescan::FixRequest* request, savescan::FixDone* out) noexcept {
+	if (out == nullptr || out->size < offsetof(savescan::FixDone, affixesRenumbered)) {
+		return 0;
+	}
+	FixJob* job = Prepare(request);
+	if (job == nullptr) {
+		return 0;
+	}
+	job->now        = out;
+	const bool mine = InterlockedCompareExchange(&g_fixBusy, 1, 0) == 0;
+	if (!mine) {
+		job->refusal = kBusy;
+	}
+	Execute(*job);
+	delete job;
+	if (mine) {
+		InterlockedExchange(&g_fixBusy, 0);
+	}
+	return 1;
+}
+
+std::vector<std::string> Lines(const std::string& text) {
+	std::vector<std::string> lines;
+	size_t                   from = 0;
+	while (from < text.size()) {
+		size_t end = text.find('\n', from);
+		end        = end == std::string::npos ? text.size() : end;
+		std::string line = text.substr(from, end - from);
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		lines.push_back(line);
+		from = end + 1;
+	}
+	return lines;
+}
+
+// Puts back what the fix of this backup wrote. On the caller's thread.
+savescan::FixOut RestoreFolder(const std::wstring& folder) {
+	savescan::FixOut out;
+	const std::wstring own = OwnFolder() + L"\\backup-";
+	if (folder.size() <= own.size() || _wcsnicmp(folder.c_str(), own.c_str(), own.size()) != 0 || folder.find(L"..") != std::wstring::npos || !IsDirectory(folder)) {
+		out.why = "Nothing was put back: " + Narrow(folder) + " is not one of Save Scan's backups (" + Narrow(own) + "...).";
+		return out;
+	}
+	out.backup = Narrow(folder);
+	std::string plan, where;
+	if (!ReadWhole(folder + L"\\written.txt", plan)) {
+		out.why = "Nothing was put back: the backup has no written.txt (a fix from before Save Scan 0.3.4, or one that wrote nothing); copy its files back by hand if needed.";
+		return out;
+	}
+	ReadWhole(folder + L"\\where-each-file-came-from.txt", where);
+	const std::string saves = Narrow(SaveFolder());
+	for (const std::string& line : Lines(where)) {
+		const size_t tab = line.find('\t');
+		if (tab == std::string::npos) {
+			continue;
+		}
+		const std::string path  = line.substr(tab + 1);
+		const size_t      slash = path.find_last_of('\\');
+		if (slash == std::string::npos || _stricmp(path.substr(0, slash).c_str(), saves.c_str()) != 0) {
+			out.why = "Nothing was put back: the backup is of another save folder (" + path.substr(0, slash == std::string::npos ? 0 : slash) + "), not " + saves + ".";
+			return out;
+		}
+	}
+	std::vector<savescan::RestoreEntry> entries;
+	for (const std::string& line : Lines(plan)) {
+		if (line.empty() || line[0] == '#') {
+			continue;
+		}
+		const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+		if (b == std::string::npos) {
+			continue;
+		}
+		savescan::RestoreEntry entry;
+		entry.name        = line.substr(0, a);
+		entry.writtenSize = strtoull(line.c_str() + a + 1, nullptr, 10);
+		entry.writtenHash = strtoull(line.c_str() + b + 1, nullptr, 16);
+		if (entry.name.find_first_of("\\/") != std::string::npos || !ReadWhole(folder + L"\\" + Widen(entry.name), entry.backup)) {
+			out.why = "Nothing was put back: the backup's copy of " + entry.name + " cannot be read.";
+			return out;
+		}
+		entries.push_back(std::move(entry));
+	}
+	WinIo io;
+	io.saves = SaveFolder();
+	io.own   = OwnFolder();
+	out        = savescan::Restore(entries, io);
+	out.backup = Narrow(folder);
+	std::string report = std::string(out.ok ? "Restored: " : "NOT ALL RESTORED: ") + out.why + "\r\n";
+	for (const savescan::FixFileOut& file : out.files) {
+		report += "  " + file.name + ": " + StateName(file.state) + (file.why.empty() ? "" : " - " + file.why) + "\r\n";
+		LogF("  restore %s: %s%s%s", file.name.c_str(), StateName(file.state), file.why.empty() ? "" : " - ", file.why.c_str());
+	}
+	WriteOwn(folder + L"\\restored.txt", report);
+	LogF("restore %s: %s", Narrow(folder).c_str(), out.why.c_str());
+	return out;
+}
+
+int __cdecl ApiRestore(const char* backupFolder, savescan::FixDone* out) noexcept {
+	if (g_ctx == nullptr || backupFolder == nullptr || out == nullptr || out->size < offsetof(savescan::FixDone, affixesRenumbered)) {
+		return 0;
+	}
+	savescan::FixOut result;
+	if (InterlockedCompareExchange(&g_fixBusy, 1, 0) != 0) {
+		result.why = "Save Scan is busy with a fix of the saves: try again when it is done. Nothing was put back.";
+	} else {
+		result = RestoreFolder(Widen(backupFolder));
+		InterlockedExchange(&g_fixBusy, 0);
+	}
+	Answer(result, out, nullptr, nullptr);
+	return 1;
+}
+
+constexpr savescan::Api kApi { sizeof(savescan::Api), savescan::kApiVersion, ApiScan, ApiDump, ApiFixSaves, ApiScanAffixes, ApiFixSavesNow, ApiRestore };
+
+
+// ---------------------------------------------------------------- at the main menu: alarms
+
+struct Alarm {
+	std::string text;
+	std::string restore; // a backup folder to offer putting back ("" = none)
+};
+SRWLOCK            g_alarmLock = SRWLOCK_INIT;
+std::vector<Alarm> g_alarms;
+std::string        g_lastAction; // what the last button did (UI thread)
+const modbook::Api* g_book = nullptr;
+int                 g_tab  = 0;
+
+void SetAlarms(std::vector<Alarm> alarms) {
+	AcquireSRWLockExclusive(&g_alarmLock);
+	g_alarms = std::move(alarms);
+	ReleaseSRWLockExclusive(&g_alarmLock);
+	if (g_book != nullptr && g_tab != 0) {
+		g_book->redraw(g_tab);
+	}
+}
+
+// A fix cut off (its plan written.txt, but no report.txt and no restored.txt), and saves that
+// hold made stats the game's table lacks now (Live Tables not installed, or its rows not laid in).
+std::vector<Alarm> FindAlarms() {
+	std::vector<Alarm> alarms;
+	const std::wstring own = OwnFolder();
+	WIN32_FIND_DATAW   entry {};
+	const HANDLE       find = InterlockedCompareExchange(&g_fixBusy, 0, 0) == 0 ? FindFirstFileW((own + L"\\backup-*").c_str(), &entry) : INVALID_HANDLE_VALUE;
+	if (find != INVALID_HANDLE_VALUE) {
+		do {
+			const std::wstring folder = own + L"\\" + entry.cFileName;
+			if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 || GetFileAttributesW((folder + L"\\written.txt").c_str()) == INVALID_FILE_ATTRIBUTES
+			    || GetFileAttributesW((folder + L"\\report.txt").c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesW((folder + L"\\restored.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+				continue;
+			}
+			alarms.push_back({ "A fix of the saves was CUT OFF (" + Narrow(entry.cFileName) + "): some saves may have the new stat numbers while the table has the old ones. Put the backup back before loading a character.", Narrow(folder) });
+		} while (FindNextFileW(find, &entry) != 0);
+		FindClose(find);
+	}
+	std::string grown;
+	if (ReadWhole(LoaderFolder() + L"\\live-suite\\live-tables\\" + Widen(ModName().empty() ? "no mod" : ModName()) + L"\\grown-rows.txt", grown)) {
+		const std::vector<savescan::MadeRow> rows = savescan::MadeStatRows(grown);
+		uintptr_t                            base = 0;
+		savescan::Tables                     shapes[3];
+		int                                  versions[3] = {}, count = 0;
+		Scan                                 unused;
+		std::string                          problem;
+		if (!rows.empty() && GameKnown(base, problem) && GameTables(base, shapes, versions, count, unused, problem, false) && ItemTables(shapes[0], problem)) {
+			std::vector<savescan::FixInput> files;
+			const std::wstring              saves = SaveFolder();
+			for (const wchar_t* pattern : { L"\\*.d2s", L"\\*.d2i" }) {
+				WIN32_FIND_DATAW file {};
+				const HANDLE     list = FindFirstFileW((saves + pattern).c_str(), &file);
+				if (list == INVALID_HANDLE_VALUE) {
+					continue;
+				}
+				do {
+					savescan::FixInput in;
+					in.name   = Narrow(file.cFileName);
+					in.stash  = pattern[3] == L'd' && pattern[5] == L'i';
+					in.tables = &shapes[0];
+					if (ReadWhole(saves + L"\\" + file.cFileName, in.bytes)) {
+						files.push_back(std::move(in));
+					}
+				} while (FindNextFileW(list, &file) != 0);
+				FindClose(list);
+			}
+			std::vector<savescan::MadeRow> missing;
+			const std::vector<std::string> holding = savescan::FilesHoldingMissing(files, shapes[0], rows, missing);
+			if (!missing.empty()) {
+				std::string stats, names;
+				for (const savescan::MadeRow& row : missing) {
+					stats += (stats.empty() ? "" : ", ") + (row.name.empty() ? std::string("stat") : row.name) + " (" + std::to_string(row.number) + ")";
+				}
+				for (const std::string& name : holding) {
+					names += (names.empty() ? "" : ", ") + name;
+				}
+				const bool loaded = GetModuleHandleW(L"d2rl-live-tables.dll") != nullptr;
+				alarms.push_back({ std::string(loaded ? "Live Tables is loaded but its made stats are NOT in the game's table (its hook is off - see its log): "
+				                                      : "Live Tables is NOT installed, so its made stats are not in the game's table: ")
+				                       + stats + "." + (holding.empty() ? " No save holds one." : " Do NOT load " + names + ": they hold those stats, and the game would read them wrong or refuse them."),
+					"" });
+			}
+		} else if (!rows.empty()) {
+			alarms.push_back({ "Save Scan could not check the saves for Live Tables' made stats: " + problem, "" });
+		}
+	}
+	return alarms;
+}
+
+void CheckAtMenu() {
+	std::vector<Alarm> alarms = FindAlarms();
+	for (const Alarm& alarm : alarms) {
+		LogF("ALARM: %s", alarm.text.c_str());
+		if (g_ctx != nullptr) {
+			g_ctx->WriteConsoleMessage(("Save Scan: " + alarm.text + (alarm.restore.empty() ? "" : " (console: savescan restore " + alarm.restore + ")")).c_str());
+		}
+	}
+	const bool any = !alarms.empty();
+	SetAlarms(std::move(alarms));
+	if (any && g_book != nullptr && g_tab != 0) {
+		g_book->open(g_tab);
+	}
+}
+
+void __cdecl TabDraw(void*, modbook::Page* page) noexcept {
+	AcquireSRWLockShared(&g_alarmLock);
+	const std::vector<Alarm> alarms = g_alarms;
+	ReleaseSRWLockShared(&g_alarmLock);
+	int y = modbook::kActionY;
+	if (modbook::HasRows(g_book)) {
+		y = g_book->action(page, "Check", "Check again", nullptr, 1);
+	} else {
+		g_book->button(page, "Check", 82, y, 232, "Check again", "$FontColorGoldYellow");
+		y += modbook::kActionRowStep;
+	}
+	if (alarms.empty()) {
+		g_book->label(page, "None", 82, y, 990, 200, "$FontColorLightGold", "left", 1,
+			"Nothing to report: no cut-off fix of the saves, and no save holds a made stat the game's table lacks.\nSave Scan reads the saves only when asked; it rewrites them only when Live Tables or Live Properties changes a stat row (after a dated backup).");
+	}
+	for (size_t i = 0; i < alarms.size() && i < 6; ++i) {
+		const std::string name = "Alarm" + std::to_string(i);
+		g_book->label(page, name.c_str(), 82, y, 990, 150, "$FontColorLightRed", "left", 1, alarms[i].text.c_str());
+		y += 160;
+		if (!alarms[i].restore.empty()) {
+			g_book->button(page, ("Restore" + std::to_string(i)).c_str(), 82, y, 470, "Put the backup back", "$FontColorGoldYellow");
+			y += modbook::kActionRowStep + 10;
+		}
+	}
+	if (!g_lastAction.empty()) {
+		g_book->label(page, "Last", 82, y + 10, 990, 200, "$FontColorWhite", "left", 1, g_lastAction.c_str());
+	}
+}
+void __cdecl TabClick(void*, const char* what) noexcept {
+	const std::string name = what != nullptr ? what : "";
+	if (name == "Check") {
+		CheckAtMenu();
+		g_lastAction = "Checked again.";
+	} else if (name.rfind("Restore", 0) == 0) {
+		const size_t index = strtoul(name.c_str() + 7, nullptr, 10);
+		std::string  folder;
+		AcquireSRWLockShared(&g_alarmLock);
+		folder = index < g_alarms.size() ? g_alarms[index].restore : "";
+		ReleaseSRWLockShared(&g_alarmLock);
+		if (!folder.empty()) {
+			savescan::FixDone done { sizeof(done) };
+			ApiRestore(folder.c_str(), &done);
+			g_lastAction = std::string(done.ok != 0 ? "Put back: " : "NOT ALL PUT BACK: ") + (done.why != nullptr ? done.why : "");
+			CheckAtMenu();
+		}
+	} else if (name == "Escape" && g_book != nullptr) {
+		g_book->close(modbook::SideOf(g_book, g_tab, modbook::kLeft));
+	}
+	if (g_book != nullptr) {
+		g_book->redraw(g_tab);
+	}
+}
+void __cdecl TabKeys(void*, const char*) noexcept {}
+void __cdecl TabMove(void*, int, int, int) noexcept {}
+void __cdecl TabShown(void*, int) noexcept {}
+int __cdecl  TabLeave(void*) noexcept {
+	return 1;
+}
+
+void BookSetUp() {
+	if (g_book != nullptr) {
+		return;
+	}
+	g_book = modbook::Find();
+	if (g_book == nullptr) {
+		return;
+	}
+	const modbook::Tab tab { sizeof(modbook::Tab), modbook::kLeft, "saves", "Saves", nullptr, TabDraw, TabClick, TabKeys, TabMove, TabShown, TabLeave, nullptr };
+	g_tab = g_book->addTab(&tab);
+	LogF("Mod Book: tab Saves (left, %s)", g_tab != 0 ? "added" : "REFUSED, see mod-book.log");
+}
+
+void __cdecl OnTablesLoaded(const D2RL::PluginContext*, const D2RL::Lifecycle::DataTablesLoadedEvent*, void*) noexcept {
+	BookSetUp();
+	if (InGame() == 0) { // the tables are read at the start, before a character loads
+		CheckAtMenu();
+	}
+}
+
+// This DLL's own file: sha256 (bcrypt), for the start line.
+std::string OwnSha256() {
+	HMODULE self = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&OwnSha256), &self)) {
+		return "?";
+	}
+	wchar_t     path[1024] = {};
+	const DWORD length     = GetModuleFileNameW(self, path, 1000);
+	std::string bytes;
+	if (length == 0 || !ReadWhole(std::wstring(path, length), bytes)) {
+		return "?";
+	}
+	BCRYPT_ALG_HANDLE algorithm = nullptr;
+	uint8_t           hash[32]  = {};
+	bool              ok        = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0
+	          && BCryptHash(algorithm, nullptr, 0, reinterpret_cast<PUCHAR>(bytes.data()), static_cast<ULONG>(bytes.size()), hash, sizeof(hash)) == 0;
+	if (algorithm != nullptr) {
+		BCryptCloseAlgorithmProvider(algorithm, 0);
+	}
+	if (!ok) {
+		return "?";
+	}
+	char text[65];
+	for (int i = 0; i < 32; ++i) {
+		snprintf(text + i * 2, 3, "%02x", hash[i]);
+	}
+	return text;
+}
 
 // ---------------------------------------------------------------- console
 
@@ -656,13 +1356,73 @@ D2RL::ConsoleCommandResult __cdecl OnConsole(D2R::Game::Client*, const D2RL::Con
 		}
 		return D2RL::ConsoleCommandResult::Handled;
 	}
+	if (args.rfind("restore", 0) == 0) {
+		std::string folder = args.size() > 8 ? args.substr(8) : "";
+		while (!folder.empty() && (folder.back() == ' ' || folder.back() == '\t')) {
+			folder.pop_back();
+		}
+		if (!folder.empty() && folder.find('\\') == std::string::npos) {
+			folder = Narrow(OwnFolder()) + "\\" + folder; // a backup's folder name alone
+		}
+		savescan::FixDone done { sizeof(done) };
+		if (folder.empty()) {
+			g_ctx->WriteConsoleMessage("Save Scan: savescan restore <backup folder> (as an alarm or a fix's report names it)");
+		} else if (ApiRestore(folder.c_str(), &done) != 0) {
+			g_ctx->WriteConsoleMessage((std::string("Save Scan: ") + (done.ok != 0 ? "" : "NOT ALL PUT BACK: ") + (done.why != nullptr ? done.why : "")).c_str());
+		}
+		return D2RL::ConsoleCommandResult::Handled;
+	}
+	if (args.rfind("check", 0) == 0) {
+		CheckAtMenu();
+		AcquireSRWLockShared(&g_alarmLock);
+		const size_t count = g_alarms.size();
+		ReleaseSRWLockShared(&g_alarmLock);
+		if (count == 0) {
+			g_ctx->WriteConsoleMessage("Save Scan: nothing to report (no cut-off fix, no save holding a made stat the table lacks)");
+		}
+		return D2RL::ConsoleCommandResult::Handled;
+	}
+	if (args.find("remove") != std::string::npos) {
+		const unsigned long stat = strtoul(args.c_str() + args.find("remove") + 6, nullptr, 10);
+		static std::vector<savescan::StatChange> changes;
+		changes.clear();
+		changes.push_back({ static_cast<uint16_t>(stat), savescan::kDropped });
+		for (unsigned long s = stat + 1; s <= 510; ++s) {
+			changes.push_back({ static_cast<uint16_t>(s), static_cast<int32_t>(s - 1) });
+		}
+		uintptr_t        base = 0;
+		savescan::Tables shapes[3];
+		int              versions[3] = {}, count = 0;
+		Scan             unused;
+		std::string      problem;
+		if (!GameKnown(base, problem) || !GameTables(base, shapes, versions, count, unused, problem, false)) {
+			g_ctx->WriteConsoleMessage(("Save Scan: " + problem).c_str());
+			return D2RL::ConsoleCommandResult::Handled;
+		}
+		if (stat >= shapes[0].stats.size() || shapes[0].stats.size() > 511) {
+			g_ctx->WriteConsoleMessage("Save Scan: savescan remove <stat number of the table>");
+			return D2RL::ConsoleCommandResult::Handled;
+		}
+		changes.resize(shapes[0].stats.size() - stat); // only the stats the table has
+		savescan::FixRequest request { sizeof(request) };
+		request.flags       = savescan::kDryRun;
+		request.changes     = changes.data();
+		request.changeCount = static_cast<uint32_t>(changes.size());
+		request.done        = [](void*, const savescan::FixDone*) noexcept {};
+		if (ApiFixSaves(&request) == 0) {
+			g_ctx->WriteConsoleMessage("Save Scan: savescan remove <stat number of the table>");
+		} else {
+			g_ctx->WriteConsoleMessage("Save Scan: dry run started (nothing is written); what would change is in the plugin log");
+		}
+		return D2RL::ConsoleCommandResult::Handled;
+	}
 	std::vector<uint16_t> stats;
 	for (const char* at = args.c_str(); *at != '\0';) {
 		char*               end   = nullptr;
 		const unsigned long value = strtoul(at, &end, 10);
 		if (end == at) {
 			if (*at != ' ' && *at != '\t') {
-				g_ctx->WriteConsoleMessage("Save Scan: savescan | savescan <stat number> [more numbers] | savescan dump");
+				g_ctx->WriteConsoleMessage("Save Scan: savescan | savescan <stat number> [more numbers] | savescan dump | savescan remove <stat number> (dry run) | savescan check | savescan restore <backup folder>");
 				return D2RL::ConsoleCommandResult::Handled;
 			}
 			++at;
@@ -691,7 +1451,7 @@ constexpr D2RL::PluginInfo kPluginInfo {
 	.name        = "Save Scan",
 	.version     = kVersion,
 	.author      = "Latedozer",
-	.description = "Reads every saved item (all characters, the shared stash) when another plugin or the console asks which items hold a stat. Does nothing otherwise.",
+	.description = "Reads every saved item (all characters, the shared stash) when another plugin or the console asks which items hold a stat, and rewrites them (after a backup) when a stat is removed, renumbered or resized. Does nothing otherwise.",
 	.flags       = D2RL::PluginFlags::Shared,
 	.reserved    = {},
 };
@@ -708,15 +1468,31 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
 	}
 	g_ctx = context;
 	static_cast<void>(context->RegisterConsoleCommand("savescan", OnConsole, "Save Scan: which saved items hold a stat (savescan <stat number>), or everything to a file (savescan dump)"));
-	LogF("Save Scan %s: ready - it works only when asked (console: savescan; other plugins: save_scan_api.h)", kVersion);
+	const D2RL::LifecycleService* lifecycle = nullptr;
+	if (context->QueryService(&lifecycle) == D2RL::ServiceQueryResult::Success && D2RL::HasLifecycleServiceField(lifecycle, offsetof(D2RL::LifecycleService, registerDataTablesLoadedListener))) {
+		D2RL::Lifecycle::DataTablesLoadedListener tables {};
+		tables.structSize = D2RL::Lifecycle::DataTablesLoadedListenerSize;
+		tables.callback   = OnTablesLoaded;
+		D2RL::Lifecycle::ListenerHandle handle = D2RL::Lifecycle::InvalidHandle;
+		static_cast<void>(lifecycle->registerDataTablesLoadedListener(context, &tables, &handle));
+	}
+	BookSetUp();
+	LogF("Save Scan %s (Api %u) sha256 %s: ready - it reads the saves only when asked and checks them at the main menu (console: savescan; other plugins: save_scan_api.h; Mod Book tab Saves)", kVersion, savescan::kApiVersion,
+		OwnSha256().c_str());
 	return true;
 }
 
 D2RL_PLUGIN_EXPORT void D2RLoaderUnloadPlugin() noexcept {
+	if (g_fixThread != nullptr) { // a fix still writing: let it end (the files are written whole, one by one)
+		WaitForSingleObject(g_fixThread, 20000);
+		CloseHandle(g_fixThread);
+		g_fixThread = nullptr;
+	}
 	g_ctx = nullptr;
 }
 
 // The Api, for other plugins (save_scan_api.h: savescan::Find).
 D2RL_PLUGIN_EXPORT const savescan::Api* __cdecl SaveScanGetApi(uint32_t version) noexcept {
-	return version == savescan::kApiVersion && g_ctx != nullptr ? &kApi : nullptr;
+	// The newest table to every caller (version >= 1): it checks version and size (save_scan_api.h Find).
+	return version >= 1 && g_ctx != nullptr ? &kApi : nullptr;
 }

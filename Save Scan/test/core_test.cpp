@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 // The save reader against COPIES of real saves (never the live files) and the mod's tables as text.
 // usage: core_test <folder with copies of .d2s/.d2i> <folder with itemstatcost/armor/weapons/misc.txt>
+#include "../fix_core.h"
 #include "../save_core.h"
 
 #include <algorithm>
@@ -34,6 +35,42 @@ static FileResult Read(const std::filesystem::path& path, const std::string& byt
 	return path.extension() == ".d2i" ? ReadStash(data, bytes.size(), tables) : ReadCharacter(data, bytes.size(), tables);
 }
 
+
+// Live Properties' stat-edits.txt: "number<TAB>signed<TAB>send bits<TAB>save bits<TAB>save add<TAB>..." (- = the row's own)
+static std::vector<ResizeSpec> StatEdits(const std::string& text, const Tables& tables) {
+	std::vector<ResizeSpec> out;
+	std::istringstream      in(text);
+	std::string             line;
+	while (std::getline(in, line)) {
+		if (line.empty() || line[0] == '#') {
+			continue;
+		}
+		std::vector<std::string> cells;
+		std::istringstream       row(line);
+		std::string              cell;
+		while (std::getline(row, cell, '\t')) {
+			cells.push_back(cell);
+		}
+		if (cells.size() < 5) {
+			continue;
+		}
+		const int number = atoi(cells[0].c_str());
+		if (number < 0 || static_cast<size_t>(number) >= tables.stats.size()) {
+			continue;
+		}
+		const StatShape& now = tables.stats[static_cast<size_t>(number)];
+		ResizeSpec       spec { static_cast<uint16_t>(number), now.saveBits, now.paramBits, now.saveAdd };
+		if (cells[3] != "-") {
+			spec.saveBits = static_cast<uint8_t>(atoi(cells[3].c_str()));
+		}
+		if (cells[4] != "-") {
+			spec.saveAdd = atoi(cells[4].c_str());
+		}
+		out.push_back(spec);
+	}
+	return out;
+}
+
 int main(int argc, char** argv) {
 	if (argc < 3) {
 		printf("usage: core_test <saves copy> <excel folder>\n");
@@ -45,6 +82,22 @@ int main(int argc, char** argv) {
 	ReadItemTable(tables, Slurp(excel / "armor.txt"), kArmor);
 	ReadItemTable(tables, Slurp(excel / "weapons.txt"), kWeapon);
 	ReadItemTable(tables, Slurp(excel / "misc.txt"), kMisc);
+	const size_t textRows = tables.stats.size();
+	if (argc > 3 && std::filesystem::exists(argv[3])) { // the rows Live Tables made: the game has them too
+		for (const MadeRow& row : MadeStatRows(Slurp(argv[3]))) {
+			if (tables.stats.size() <= row.number) {
+				tables.stats.resize(static_cast<size_t>(row.number) + 1);
+			}
+			tables.stats[row.number] = row.shape;
+		}
+		printf("      %zu made rows from %s (the table: %zu text rows -> %zu)\n", tables.stats.size() - textRows, argv[3], textRows, tables.stats.size());
+	}
+	if (argc > 4 && std::filesystem::exists(argv[4])) { // and the shapes Live Properties changed in memory
+		const std::vector<ResizeSpec> edits = StatEdits(Slurp(argv[4]), tables);
+		std::string                   bad;
+		ApplyBefore(tables, edits, bad);
+		printf("      %zu stat edits of Live Properties applied (copy of stat-edits.txt)\n", edits.size());
+	}
 	Check(tables.stats.size() > 359 && tables.stats[7].saveBits != 0 && tables.items.count("hp1") == 1 && tables.items["cap"].kind == kArmor && tables.items["cm1"].charm && tables.items["tbk"].tome,
 		"tables: " + std::to_string(tables.stats.size()) + " stats, " + std::to_string(tables.items.size()) + " item codes");
 

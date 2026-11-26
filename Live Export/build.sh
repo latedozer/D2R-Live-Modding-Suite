@@ -23,5 +23,5 @@ fi
 x86_64-w64-mingw32-windres -I "$SDK" live-export.rc -O coff -o build/resources.o
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-subobject-linkage -fno-exceptions -fno-rtti -Wno-unknown-pragmas -I "$SDK" -I "$CASC/src" "${CASC_DEFS[@]}" \
   -shared -s -static -static-libgcc -static-libstdc++ \
-  -o build/d2rl-live-export.dll plugin.cpp export_core.cpp build/resources.o build/casclib/libcasc.a -lws2_32
+  -o build/d2rl-live-export.dll plugin.cpp export_core.cpp build/resources.o build/casclib/libcasc.a -lws2_32 -lbcrypt
 ls -la build/d2rl-live-export.dll

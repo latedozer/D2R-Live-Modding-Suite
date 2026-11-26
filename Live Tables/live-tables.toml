@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
+# Live Tables: ItemStatCost and Properties grow by a row while the game runs (other plugins ask for
+# the rows; console: type tables). Rows grown are kept in d2rloader\live-suite\live-tables\<mod>\
+# grown-rows.txt and added again every time the game reads the tables.
+# Close the game before editing this file; changes apply on the next start.
+
+# false = Live Tables does nothing. Characters that carry an item with a grown stat then CANNOT be
+# read correctly (the stat has no row), so take such items off first.
+enabled = true

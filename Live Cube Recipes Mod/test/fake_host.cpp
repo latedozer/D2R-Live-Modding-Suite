@@ -733,6 +733,8 @@ int main(int argc, char** argv) {
 	const HMODULE modBook = argc > 4 ? LoadLibraryA(argv[4]) : nullptr;
 	const auto    bookLoad = modBook != nullptr ? reinterpret_cast<D2RL::LoadPluginFn>(reinterpret_cast<void*>(GetProcAddress(modBook, D2RL_PLUGIN_LOAD_EXPORT))) : nullptr;
 	Check(bookLoad != nullptr && bookLoad(&g_context), "the Mod Book plugin loads and starts");
+	const HMODULE liveProps = LoadLibraryA("d2rl-live-properties.dll"); // a stand-in: knows the made property "my-prop"
+	const HMODULE liveTables = LoadLibraryA("d2rl-live-tables.dll"); // a stand-in: API 3, its change listener and remove veto only
 	const HMODULE plugin = LoadLibraryA(argv[1]);
 	Check(plugin != nullptr, "the plugin loads");
 	if (plugin == nullptr) {
@@ -906,18 +908,29 @@ int main(int argc, char** argv) {
 		Pump(120);
 		Check(OpenBook() != nullptr && Widget("Page") == "1 - 8 of 227", "and opens it again");
 
-		// ---- the legend, on the other side
+		// ---- the legend: two sections of the Mod Book's Legend, on the other side
 		const auto bookSide = reinterpret_cast<void (*)(int)>(reinterpret_cast<void*>(GetProcAddress(modBook, "ModBookSide")));
+		const auto rowLine  = [&](int i) { // a Legend row as "code - meaning" (its two labels)
+			return Widget(("Code" + std::to_string(i)).c_str()) + " - " + Widget(("Meaning" + std::to_string(i)).c_str());
+		};
+		const auto rowOf    = [&](const std::string& start) { // the Legend's row that starts so, or -1
+			for (int i = 0; i < 40; ++i) {
+				if (rowLine(i).rfind(start, 0) == 0) {
+					return i;
+				}
+			}
+			return -1;
+		};
 		g_legendCommand(nullptr, &open, g_legendData);
 		Pump(120);
 		g_view = "Right";
 		const FakePanel* legendPanel = OpenBook();
 		Check(legendPanel != nullptr && legendPanel->loaded.find("$RightPanelRect") != std::string::npos && legendPanel->loaded.find("$RightHingeSprite") != std::string::npos
-				&& Widget("Title0").rfind("nor  -  normal quality", 0) == 0 && Widget("Detail0") == "recipe word: quality" && Widget("DoGroup0") == "[ General ]" && Widget("DoGroup1") == "[ Cube Recipes ]" && Widget("Search") == "Type a word or code: rar, shld, r10",
-			"recipelegend opens the legend on the right side of the screen (" + Widget("Title0") + " | " + Widget("Page") + ")");
+				&& Widget("DoSec0") == "[ Recipe codes ]" && Widget("DoSec1") == "[ Recipe columns ]" && rowLine(0).rfind("Reading a recipe - A recipe's description", 0) == 0
+				&& rowOf("nor - normal quality") >= 0 && Widget("Search") != "<none>",
+			"recipelegend opens the Mod Book's Legend on the right, on Recipe codes: How it works first, then each entry as its code with its meaning under it (" + rowLine(0) + " | " + Widget("Page") + ")");
 		{
-			// the second tab: the columns and what their values mean
-			const auto tab = [&](const char* which) {
+			const auto legendClick = [&](const char* which) {
 				const std::string name = std::string("mod-book/ClickRight") + which;
 				D2RL::SharedEvents::UiMessageEvent ui {};
 				ui.structSize = D2RL::SharedEvents::UiMessageEventSize;
@@ -928,20 +941,21 @@ int main(int argc, char** argv) {
 				Pump(150);
 			};
 			const std::string firstPage = Widget("Page");
-			tab("Tab1");
-			const bool second = Widget("Title0").rfind("op  -  one extra condition", 0) == 0 && Widget("Search") == "Type: op 18, param, stat 370, plvl" && Widget("Page") != firstPage;
+			legendClick("Sec1");
+			const bool second = rowLine(0).rfind("The columns of a recipe - ", 0) == 0 && rowOf("op - one extra condition") >= 0 && Widget("Page") != firstPage;
 			bookSide(1);
 			type("op 18");
-			const bool found = Widget("Title0").rfind("op 18  -  the input item's stat param, as it is now", 0) == 0;
-			bookKey(VK_DELETE, 0);
-			type("class = war");
-			const bool value = Widget("Title0") == "class = war  -  only a Warlock can use the recipe" && Widget("Page") == "1 - 1 of 1";
-			bookKey(VK_DELETE, 0);
+			const bool found = rowOf("op 18   (Recipe columns) - the input item's stat param") >= 0;
+			bookKey(VK_DELETE, 0); // Delete empties the search
 			Pump(150);
-			tab("Tab0");
-			Check(second && found && value && Widget("Title0").rfind("nor  -  normal quality", 0) == 0 && Widget("Page") == firstPage,
-				"the legend's second tab has the columns and their values (op 18, class = war ...); the first tab comes back as it was");
-			// the player drags a tab's button: Recipe Terms onto the recipe book's tab on the left, then back onto Terms
+			const bool emptied = rowOf("The columns of a recipe - ") == 0;
+			type("class = war");
+			const bool value = rowOf("class = war   (Recipe columns) - only a Warlock can use the recipe") >= 0;
+			const std::string what = rowLine(0) + " | " + Widget("Page");
+			legendClick("Sec0");
+			Check(second && found && emptied && value && rowLine(0).rfind("Reading a recipe - ", 0) == 0 && Widget("Page") == firstPage,
+				"the Recipe columns section has the columns and their values (op 18, class = war; Delete empties the search); Recipe codes comes back as it was (" + what + ")");
+			// the player drags the Legend's tab button onto the recipe book's tab on the left, then back
 			const auto drag = reinterpret_cast<void (*)(const char*, int, const char*)>(reinterpret_cast<void*>(GetProcAddress(modBook, "ModBookDrag")));
 			char exe[MAX_PATH] = {};
 			GetModuleFileNameA(nullptr, exe, MAX_PATH);
@@ -950,27 +964,29 @@ int main(int argc, char** argv) {
 			bool dragged = false, back = false;
 			std::string order, why;
 			if (drag != nullptr) {
-				drag("legendcolumns", 0, "recipes");
+				drag("legend", 0, "recipes");
 				Pump(400);
 				g_view = "Left";
-				const bool left = OpenBook() != nullptr && Widget("DoTab0") == "[ Recipe Terms ]" && Widget("DoTab1") == "[ Cube Recipes ]" && Widget("Title0").rfind("op  -  one extra condition", 0) == 0;
-				why = Widget("DoTab0") + " | " + Widget("Title0");
-				g_view = "Right";
-				const bool right = OpenBook() != nullptr && Widget("Title0").rfind("nor  -  normal quality", 0) == 0;
-				order = ReadText(orderFile);
-				dragged = left && right && order.find("Left\tlegendcolumns\t-\r\nLeft\trecipes\t-\r\nRight\tlegendwords\tCube Recipes") != std::string::npos;
-				drag("legendcolumns", 1, "terms");
+				dragged = OpenBook() != nullptr && Widget("DoTab0") == "[ Legend ]" && Widget("DoTab1") == "[ Cube Recipes ]";
+				why     = Widget("DoTab0") + " " + Widget("DoTab1");
+				order   = ReadText(orderFile);
+				dragged = dragged && order.find("Left\tlegend\t") != std::string::npos && order.find("Left\trecipes\t") != std::string::npos;
+				drag("legend", 1, nullptr);
 				Pump(400);
 				g_view = "Left";
-				back = OpenBook() != nullptr && Widget("DoTab1") == "<none>";
+				back   = OpenBook() != nullptr && Widget("DoTab0") == "<none>";
 				g_view = "Right";
-				order = ReadText(orderFile);
+				order  = ReadText(orderFile);
 				why += " | " + std::to_string(dragged) + std::to_string(back) + " | " + order;
-				back = back && order.find("Right\tlegendwords\tCube Recipes\r\nRight\tlegendcolumns\tGeneral\r\nRight\tterms\tGeneral") != std::string::npos;
-				tab("Tab0");
+				back = back && order.find("Right\tlegend\tGeneral") != std::string::npos && order.find("Left\tlegend") == std::string::npos;
 			}
 			DeleteFileA(orderFile.c_str());
-			Check(dragged && back, "a tab's button dragged to the other side: the tab goes there, draws its own page, and tab-order.txt keeps the order; dragged back it takes its group again (" + why + ")");
+			Check(dragged && back, "a tab's button dragged to the other side: the tab goes there and tab-order.txt keeps the order; dragged back it takes its group again (" + why + ")");
+			if (OpenBook() == nullptr) { // the Legend on screen again for what follows
+				g_legendCommand(nullptr, &open, g_legendData);
+				Pump(150);
+			}
+			legendClick("Sec0");
 			bookSide(-1);
 		}
 		g_view = "Left";
@@ -978,10 +994,7 @@ int main(int argc, char** argv) {
 		bookSide(1); // the cursor is over the legend
 		type("shld");
 		g_view = "Right";
-		bool shield = false;
-		for (int i = 0; i < 10; ++i) {
-			shield = shield || Widget(("Title" + std::to_string(i)).c_str()) == "shld  -  Any Shield";
-		}
+		const bool shield = rowOf("shld   (Recipe codes) - Any Shield") >= 0;
 		Check(shield && Widget("Search") == "shld_", "with the cursor over the legend, typing looks a code up there (" + Widget("Page") + ")");
 		g_view = "Left";
 		Check(Widget("Search") == "Type to search the recipes" && Widget("Page") == "1 - 8 of 227", "and the recipe book is not searched");
@@ -1213,7 +1226,7 @@ int main(int argc, char** argv) {
 				&& Widget("Value0").substr(0, 30) == second.substr(0, 30),
 			"a click on a recipe opens its card: every cell, and Edit / Copy as new / Disable / Remove");
 		click("Toggle");
-		Check(Widget("DoSave") == "[ Save 1 change ]" && has("DoDiscard") && Widget("Title1").rfind("* " + second.substr(0, 30), 0) == 0 && Widget("Detail1").find("(not enabled)") != std::string::npos && rotw->rows == before,
+		Check(Widget("DoSave") == "[ Save (1) ]" && has("DoDiscard") && Widget("Title1").rfind("* " + second.substr(0, 30), 0) == 0 && Widget("Detail1").find("(not enabled)") != std::string::npos && rotw->rows == before,
 			"Disable: the list shows it switched off and marked as changed, Save appears; the cube is not touched");
 		click("Row0");
 		click("Remove");
@@ -1222,11 +1235,11 @@ int main(int argc, char** argv) {
 		click("ConfirmNo");
 		const bool kept = Widget("Title") == "Recipe" && Widget("Value0").substr(0, 30) == first.substr(0, 30);
 		click("Back");
-		const bool still = Widget("DoSave") == "[ Save 1 change ]" && Widget("Page") == "1 - 8 of 227";
+		const bool still = Widget("DoSave") == "[ Save (1) ]" && Widget("Page") == "1 - 8 of 227";
 		click("Row0");
 		click("Remove");
 		click("ConfirmYes");
-		Check(asksRemove && kept && still && Widget("DoSave") == "[ Save 2 changes ]" && Widget("Title0").rfind("* " + second.substr(0, 30), 0) == 0 && Widget("Page") == "1 - 8 of 226",
+		Check(asksRemove && kept && still && Widget("DoSave") == "[ Save (2) ]" && Widget("Title0").rfind("* " + second.substr(0, 30), 0) == 0 && Widget("Page") == "1 - 8 of 226",
 			"Remove asks first (naming the recipe); Cancel keeps it; Yes takes it out of the list");
 		click("Search");
 		const bool nothingNew = Widget("Title") == "Search for New Recipes" && Widget("Ask").find("Every recipe of the mod and the game is in your list already (or was deleted by you)") == 0 && !has("DoConfirmYes") && Widget("DoConfirmNo") == "[ Back ]";
@@ -1236,11 +1249,11 @@ int main(int argc, char** argv) {
 		const bool asks = Widget("Title") == "Restore Deleted Defaults" && Widget("Ask").find("1 recipe of the mod and the game was deleted by you.") == 0 && Widget("DoConfirmYes") == "[ Put 1 recipe back ]" && Widget("DoConfirmNo") == "[ Cancel ]"
 			&& Widget("First0").substr(0, 30) == first.substr(0, 30);
 		click("ConfirmNo");
-		const bool cancelled = Widget("Page") == "1 - 8 of 226" && Widget("DoSave") == "[ Save 2 changes ]";
+		const bool cancelled = Widget("Page") == "1 - 8 of 226" && Widget("DoSave") == "[ Save (2) ]";
 		click("RestoreAll");
 		click("ConfirmYes");
 		page(VK_END);
-		Check(asks && cancelled && Widget("DoSave") == "[ Save 3 changes ]" && Widget("Page") == "220 - 227 of 227" && Widget("Title7") == first,
+		Check(asks && cancelled && Widget("DoSave") == "[ Save (3) ]" && Widget("Page") == "220 - 227 of 227" && Widget("Title7") == first,
 			"Restore deleted defaults asks first (naming the recipe), Cancel leaves the list, Yes puts it back at the end");
 		page(VK_HOME);
 		click("New");
@@ -1267,7 +1280,7 @@ int main(int argc, char** argv) {
 		page(VK_DELETE);
 		typeText("r11");
 		click("Done");
-		Check(Widget("DoSave") == "[ Save 4 changes ]" && Widget("Title0") == "* My Recipe" && Widget("Detail0") == "r11  <-  hax,qty=2" && rotw->rows == before && Lines(ReadText(mineFile)).size() == 1,
+		Check(Widget("DoSave") == "[ Save (4) ]" && Widget("Title0") == "* My Recipe" && Widget("Detail0") == "r11  <-  hax,qty=2" && rotw->rows == before && Lines(ReadText(mineFile)).size() == 1,
 			"Done: the new recipe is first in the list; still nothing in recipes.txt or the cube");
 		click("Row0");
 		const bool mineCard = Widget("What") == "Changed or made by you." && Widget("Name2") == "numinputs" && Widget("Value2") == "2";
@@ -1276,13 +1289,13 @@ int main(int argc, char** argv) {
 		page(VK_BACK);
 		typeText("2");
 		click("Done");
-		Check(mineCard && Widget("DoSave") == "[ Save 5 changes ]" && Widget("Detail0") == "r12  <-  hax,qty=2", "the card of a new recipe says it is yours (numinputs counted for you); Edit changes it in place");
+		Check(mineCard && Widget("DoSave") == "[ Save (5) ]" && Widget("Detail0") == "r12  <-  hax,qty=2", "the card of a new recipe says it is yours (numinputs counted for you); Edit changes it in place");
 		g_action(&g_context, &press, g_actionData); // Ctrl+B with changes not saved
 		Pump(150);
 		Check(OpenBook() != nullptr && Widget("Title") == "Unsaved Changes" && Widget("Ask").find("You have 5 changes") == 0 && has("DoPromptSave") && has("DoPromptDiscard") && has("DoPromptBack"),
 			"closing the book with unsaved changes asks: Save, Discard, Keep editing");
 		click("PromptBack");
-		const bool back = Widget("DoSave") == "[ Save 5 changes ]";
+		const bool back = Widget("DoSave") == "[ Save (5) ]";
 		page(VK_ESCAPE);
 		Check(back && Widget("Title") == "Unsaved Changes", "Keep editing goes back; Escape asks too");
 		size_t consoleAt = g_console.size();
@@ -1303,7 +1316,7 @@ int main(int argc, char** argv) {
 		click("Row0");
 		click("Remove");
 		click("ConfirmYes");
-		Check(offCard && Widget("DoSave") == "[ Save 2 changes ]" && Widget("Title0") == second && Widget("Page") == "1 - 8 of 227", "Enable and the removal of your own recipe are two changes; the enabled recipe is as the mod has it again (no mark)");
+		Check(offCard && Widget("DoSave") == "[ Save (2) ]" && Widget("Title0") == second && Widget("Page") == "1 - 8 of 227", "Enable and the removal of your own recipe are two changes; the enabled recipe is as the mod has it again (no mark)");
 		click("Discard");
 		page(VK_HOME);
 		Check(!has("DoSave") && Widget("Title0") == "* My Recipe" && Widget("Page") == "1 - 8 of 228", "Discard drops them: the list is the saved one again");
@@ -1343,7 +1356,7 @@ int main(int argc, char** argv) {
 		click("Search");
 		const bool found = Widget("Ask").find("1 recipe of the mod and the game is not in your list.") == 0 && Widget("DoConfirmYes") == "[ Add 1 recipe ]" && Widget("First0").substr(0, 30) == third.substr(0, 30);
 		click("ConfirmYes");
-		const bool added = Widget("DoSave") == "[ Save 1 change ]" && Widget("Page") == "1 - 8 of 228";
+		const bool added = Widget("DoSave") == "[ Save (1) ]" && Widget("Page") == "1 - 8 of 228";
 		consoleAt = g_console.size();
 		click("Save");
 		Pump(3000, [&] { return Consoled("recipes.txt:", consoleAt); });
@@ -1379,9 +1392,9 @@ int main(int argc, char** argv) {
 				CloseClipboard();
 				return ok;
 			};
-			const auto rowOf = [&](const std::string& start) {
-				for (int i = 0; i < 9; ++i) {
-					if (Widget(("Title" + std::to_string(i)).c_str()).rfind(start, 0) == 0) {
+			const auto rowOf = [&](const std::string& start) { // the Legend's row ("code - meaning") that starts so
+				for (int i = 0; i < 40; ++i) {
+					if ((Widget(("Code" + std::to_string(i)).c_str()) + " - " + Widget(("Meaning" + std::to_string(i)).c_str())).rfind(start, 0) == 0) {
 						return i;
 					}
 				}
@@ -1389,12 +1402,12 @@ int main(int argc, char** argv) {
 			};
 			const bool newKey = combo('N', 2) && Widget("Title") == "New Recipe" && Widget("Page") == "cells 1 - 10 of 10" && Widget("Name6") == "output" && Widget("Name7") == "mod 1" && Widget("DoCells") == "[ All cells ]";
 			click("Cells");
-			const bool all = Widget("DoCells") == "[ Fewer cells ]" && Widget("Page") == "cells 1 - 11 of 105" && Widget("Name10") == "output" && Widget("ScrollMark") != "<none>";
+			const bool all = Widget("DoCells") == "[ Fewer cells ]" && Widget("Page") == "cells 1 - 10 of 105" && Widget("Name9") != "<none>" && Widget("Name10") == "<none>" && Widget("ScrollMark") != "<none>";
 			bookWheel(-120);
 			Pump(150);
-			const bool wheeled = Widget("Page") == "cells 3 - 13 of 105" && Widget("Name0") == "numinputs";
+			const bool wheeled = Widget("Page") == "cells 3 - 12 of 105" && Widget("Name0") == "numinputs" && Widget("Name8") == "output";
 			page(VK_NEXT);
-			const bool paged = Widget("Page") == "cells 14 - 24 of 105";
+			const bool paged = Widget("Page") == "cells 13 - 22 of 105";
 			click("Cells");
 			Check(newKey && all && wheeled && paged && Widget("Page") == "cells 1 - 10 of 10" && Widget("Value0") == "_",
 				"Ctrl+N starts a new recipe; the editor shows the usual cells, \"All cells\" every one, and the wheel and Page Down scroll them (" + Widget("Page") + ")");
@@ -1415,61 +1428,71 @@ int main(int argc, char** argv) {
 			Check(down && backTab && clip && took && pasted && Widget("Value4") == "hax,qty=2_",
 				"the arrows, Tab and Shift+Tab go from cell to cell; Ctrl+V pastes the clipboard's first cell, Ctrl+C copies the cell (" + Widget("Value3") + " | " + Widget("Value4") + ")");
 			page(VK_DELETE);
-			// the legend beside it: a click on an entry puts its code into the cell
+			// the Legend beside it: an entry's card has Insert, which puts its text into the cell
 			g_legendCommand(nullptr, &open, g_legendData);
 			Pump(200);
 			bookSide(1);
 			g_view = "Right";
-			page(VK_DELETE);
+			legendClick("Sec0");
 			typeText("shld");
-			const int shield = rowOf("shld  -  ");
+			const int shield = rowOf("shld   (Recipe codes) - ");
 			legendClick("Row" + std::to_string(shield));
-			page(VK_DELETE);
+			const bool card = Widget("DoInsert") == "[ Insert shld ]" && Widget("CardCode").rfind("shld", 0) == 0 && Widget("CardText").find("Any Shield") != std::string::npos;
+			legendClick("Insert");
+			const bool note = Widget("Page") == "'shld' put into the cell";
+			legendClick("Back");
+			legendClick("Sec0");
 			typeText("rar");
-			const int rare = rowOf("rar  -  ");
+			const int rare = rowOf("rar   (Recipe codes) - ");
 			legendClick("Row" + std::to_string(rare));
+			legendClick("Insert");
+			legendClick("Back");
 			g_view = "Left";
-			const bool codes = shield >= 0 && rare >= 0 && Widget("Value4") == "shld,rar_";
+			const bool codes = shield >= 0 && rare >= 0 && card && note && Widget("Value4") == "shld,rar_";
 			g_view = "Right";
-			legendClick("Tab1");
-			legendClick("Row0"); // a column's explanation: nothing to put in
-			page(VK_DELETE);
+			legendClick("Sec1");
+			legendClick("Row0"); // How it works: nothing to put in
+			const bool noInsert = Widget("CardCode") == "The columns of a recipe   (Recipe columns, how it works)" && Widget("DoInsert") == "<none>" && Widget("DoBack") != "<none>";
+			legendClick("Back");
 			typeText("op 18");
-			const int op = rowOf("op 18");
+			const int op = rowOf("op 18   (Recipe columns) - ");
 			legendClick("Row" + std::to_string(op));
+			legendClick("Insert");
+			legendClick("Back");
 			g_view = "Left";
-			Check(codes && op >= 0 && Widget("Value4") == "shld,rar,18_", "a click on a legend entry puts its code into the cell typed into (with a comma in inputs); of the second tab only op and stat numbers (" + Widget("Value4") + ")");
+			Check(codes && noInsert && op >= 0 && Widget("Value4") == "shld,rar,18_",
+				"an entry's Insert puts its text into the cell typed into (with a comma in inputs); op 18 puts 18; How it works has no Insert (" + Widget("Value4") + ")");
 			g_view = "Right";
-			legendClick("Tab0");
-			page(VK_DELETE);
-			g_legendCommand(nullptr, &open, g_legendData);
+			legendClick("Sec0");
+			g_legendCommand(nullptr, &open, g_legendData); // again: closed
 			Pump(200);
+			Check(OpenBook() == nullptr, "recipelegend again closes the Legend");
 			g_view = "Left";
 			bookSide(-1);
 			page(VK_DELETE);
 			click("Field6");
 			typeText("r11");
 			page(VK_RETURN);
-			const bool entered = Widget("DoSave") == "[ Save 1 change ]" && Widget("Title0") == "* r11 <- 2 Hand Axe" && Widget("Page") == "1 - 8 of 229";
+			const bool entered = Widget("DoSave") == "[ Save (1) ]" && Widget("Title0") == "* r11 <- 2 Hand Axe" && Widget("Page") == "1 - 8 of 229";
 			// undo and redo, as far back as the last save
 			const bool undoThere = Widget("DoUndo") == "[ Undo ]";
 			combo('Z', 2);
 			const bool undone = !has("DoSave") && !has("DoUndo") && Widget("Page") == "1 - 8 of 228" && Widget("Title0") != "* r11 <- 2 Hand Axe";
 			const bool noMore = !EditorHas(combo('Z', 2)) && Widget("Page") == "1 - 8 of 228";
 			combo('Y', 2);
-			const bool redone = Widget("DoSave") == "[ Save 1 change ]" && Widget("Title0") == "* r11 <- 2 Hand Axe" && Widget("Page") == "1 - 8 of 229";
+			const bool redone = Widget("DoSave") == "[ Save (1) ]" && Widget("Title0") == "* r11 <- 2 Hand Axe" && Widget("Page") == "1 - 8 of 229";
 			click("Row1"); // a default: removed (noted as deleted), then switched off another, then both taken back
 			click("Remove");
 			click("ConfirmYes");
 			click("Row1");
 			click("Toggle");
-			const bool three = Widget("DoSave") == "[ Save 3 changes ]" && Widget("Page") == "1 - 8 of 228";
+			const bool three = Widget("DoSave") == "[ Save (3) ]" && Widget("Page") == "1 - 8 of 228";
 			click("Undo");
 			click("Undo");
 			click("RestoreAll");
 			const bool noteGone = Widget("Ask").find("No recipe of the mod or the game is noted as deleted by you.") == 0;
 			click("ConfirmNo");
-			Check(undoThere && undone && noMore && redone && three && noteGone && Widget("DoSave") == "[ Save 1 change ]" && Widget("Page") == "1 - 8 of 229" && Lines(ReadText(mineFile)).size() == 229,
+			Check(undoThere && undone && noMore && redone && three && noteGone && Widget("DoSave") == "[ Save (1) ]" && Widget("Page") == "1 - 8 of 229" && Lines(ReadText(mineFile)).size() == 229,
 				"Ctrl+Z and the Undo button take changes back one by one (the note of a removed default too), Ctrl+Y makes one again; nothing reaches the file (" + Widget("DoSave") + ", " + Widget("Page") + ")");
 			consoleAt = g_console.size();
 			combo('S', 2);
@@ -1504,7 +1527,7 @@ int main(int argc, char** argv) {
 		click("Row0");
 		click("Remove");
 		click("ConfirmYes");
-		const bool changed = Widget("DoSave") == "[ Save 1 change ]" && Widget("Page") == "1 - 8 of 227";
+		const bool changed = Widget("DoSave") == "[ Save (1) ]" && Widget("Page") == "1 - 8 of 227";
 		click("Templates");
 		click("Load0");
 		const bool asksLoad = Widget("Title") == "Load a Template" && Widget("Ask").find("Load the template \"Rune Set-1\" (228 recipes)?") == 0 && Widget("Ask").find("changes not saved included") != std::string::npos
@@ -1513,7 +1536,7 @@ int main(int argc, char** argv) {
 		const bool stays = Widget("Title") == "Recipe Templates";
 		click("Load0");
 		click("ConfirmYes");
-		Check(changed && asksLoad && stays && Widget("DoSave") == "[ Save 2 changes ]" && Widget("Page") == "1 - 8 of 228" && rotw->count == 231,
+		Check(changed && asksLoad && stays && Widget("DoSave") == "[ Save (2) ]" && Widget("Page") == "1 - 8 of 228" && rotw->count == 231,
 			"loading a template asks first, then puts its list into the book in place of the one there; the cube has it only after Save");
 		click("Templates");
 		click("Delete0");
@@ -1524,6 +1547,169 @@ int main(int argc, char** argv) {
 		click("Discard");
 		page(VK_ESCAPE);
 		Check(OpenBook() == nullptr && !bookKey('A', 0), "Escape with nothing unsaved closes the book");
+		// a property made this session (Live Properties knows it, the game's name table does not yet)
+		{
+			const std::vector<std::string> header = Split(mine[0], '\t');
+			const auto line = [&](const char* description, const char* property, bool amount = true) {
+				std::vector<std::string> cells(header.size());
+				const auto set = [&](const char* name, const char* value) {
+					const int at = Column(header, name);
+					if (at >= 0) {
+						cells[static_cast<size_t>(at)] = value;
+					}
+				};
+				set("description", description);
+				set("enabled", "1");
+				set("version", "100");
+				set("numinputs", "1");
+				set("input 1", "hax");
+				set("output", "useitem");
+				set("mod 1", property);
+				if (amount) {
+					set("mod 1 min", "1");
+					set("mod 1 max", "1");
+				}
+				std::string text;
+				for (size_t i = 0; i < cells.size(); ++i) {
+					text += (i == 0 ? "" : "\t") + cells[i];
+				}
+				return text;
+			};
+			const size_t from = g_console.size();
+			WriteText(mineFile, Join(std::vector<std::string> { mine[0], line("made", "my-prop"), line("unknown", "nope-prop") }));
+			TypeRecipes();
+			Pump(4000, [&] { return Consoled("is not a property code", from); });
+			Pump(300);
+			bool placed = false;
+			for (size_t r = 0; r < rotw->count && rotw->rows != nullptr; ++r) {
+				uint32_t number = 0;
+				memcpy(&number, rotw->rows + r * kWide + 0x5a + 0x1d, 4);
+				placed = placed || number == 903;
+			}
+			Check(liveProps != nullptr && placed && Consoled("\"nope-prop\" is not a property code", from) && !Consoled("\"my-prop\" is not a property code", from),
+				"a property code the game does not know yet is asked of Live Properties: a made one takes its row (903 in Reign of the Warlock), an unknown one is still refused");
+
+			// Live Tables: a property made AFTER the recipe was written, and a row taken out (the
+			// user's vit-str, 2026-11-25); a mod without an amount is taken, with a note
+			const auto fakeMake   = liveProps != nullptr ? reinterpret_cast<void(__cdecl*)(const char*, int)>(reinterpret_cast<void*>(GetProcAddress(liveProps, "FakeMakeProperty"))) : nullptr;
+			const auto fakeChange = liveTables != nullptr ? reinterpret_cast<int(__cdecl*)(int, uint64_t)>(reinterpret_cast<void*>(GetProcAddress(liveTables, "FakeTableChange"))) : nullptr;
+			const auto hasNumber  = [&](uint32_t wanted) {
+				for (size_t r = 0; r < rotw->count && rotw->rows != nullptr; ++r) {
+					uint32_t number = 0;
+					memcpy(&number, rotw->rows + r * kWide + 0x5a + 0x1d, 4);
+					if (number == wanted) {
+						return true;
+					}
+				}
+				return false;
+			};
+			Check(fakeMake != nullptr && fakeChange != nullptr && Logged("Live Tables: found (API 3); a property or stat row made or taken out during play is read into the recipes at once")
+					&& Logged("Live Tables: a stat or property row your recipe files name cannot be removed (remove veto on)"),
+				"Live Tables (API 3) is found at the tables-read notice; its change listener and remove veto are taken");
+			if (fakeMake != nullptr && fakeChange != nullptr) {
+				const size_t late = g_console.size();
+				WriteText(mineFile, Join(std::vector<std::string> { mine[0], line("late", "late-prop"), line("Small Charm <- smca", "my-prop", false) }));
+				TypeRecipes();
+				Pump(4000, [&] { return Consoled("\"late-prop\" is not a property code", late); });
+				Pump(300);
+				const bool refusedFirst = !hasNumber(950) && hasNumber(903) && Consoled("\"late-prop\" is not a property code", late);
+				Check(Consoled("Small Charm <- smca", late) && Consoled("mod 1 my-prop has no amount: its min, max and param are blank (0), so the item gets nothing. Put the amount in mod 1 min and mod 1 max", late),
+					"a mod with a property code and blank min, max and param is taken, and the console says it gives nothing and where the amount goes");
+				fakeMake("late-prop", 950);
+				const size_t grown = g_console.size();
+				const bool   heard = fakeChange(0, 949) == 1; // Grow, as Live Tables' job calls it: nothing typed after it
+				Pump(4000, [&] { return hasNumber(950); });
+				Check(refusedFirst && heard && hasNumber(950) && hasNumber(903) && Logged("Live Tables: a row was made; the recipes are compiled again") && !Consoled("\"late-prop\" is not a property code", grown),
+					"a recipe line refused for a property that did not exist yet is read at once when Live Tables makes the row (no recipes typed, no kept refusal)");
+				fakeMake("late-prop", 949);
+				fakeChange(5, 900); // Remove of a row below it: late-prop is one lower now
+				Pump(4000, [&] { return hasNumber(949); });
+				Check(hasNumber(949) && !hasNumber(950) && Logged("Live Tables: a row was taken out (numbers moved); the recipes are compiled again"),
+					"when Live Tables takes a row out, the cube's records are compiled again with the new numbers (the kept compiled lines are let go)");
+				const size_t quiet = g_log.size();
+				WriteText(mineFile, Join(std::vector<std::string> { mine[0], line("made", "my-prop") }));
+				TypeRecipes();
+				Pump(4000, [&] { return !hasNumber(949); });
+				fakeChange(0, 950);
+				Pump(500);
+				Check(Logged("Live Tables: a row was made; no recipe line waited for it", quiet), "a row made while no line was refused leaves the cube's list as it is");
+				// the remove veto: recipes.txt names my-prop (903) in mod 1 of line 2
+				const auto fakeAsk = reinterpret_cast<int(__cdecl*)(int, int, int, char*, size_t)>(reinterpret_cast<void*>(GetProcAddress(liveTables, "FakeAskRemove")));
+				char       whyNamed[400] = "", whyAfter[400] = "", whyFree[400] = "", whyStat[400] = "";
+				const int  named = fakeAsk != nullptr ? fakeAsk(1, 3, 903, whyNamed, sizeof(whyNamed)) : -1;
+				const int  after = fakeAsk != nullptr ? fakeAsk(1, 3, 800, whyAfter, sizeof(whyAfter)) : -1; // a middle row: 903 would move
+				const int  free_ = fakeAsk != nullptr ? fakeAsk(1, 3, 904, whyFree, sizeof(whyFree)) : -1;
+				const int  stat  = fakeAsk != nullptr ? fakeAsk(0, 3, 0, whyStat, sizeof(whyStat)) : -1;  // the mod's Horadric Staff line has op 28 (no stat): nothing names a stat
+				Check(named == 0 && std::string(whyNamed).find("Live Cube Recipes: recipes.txt: line 2 (made) names property 903 or a row after it in mod 1; change or remove that line first") == 0
+						&& after == 0 && free_ == 1 && stat == 1 && Logged("Live Tables asked to remove property row 903 (data version 3): refused"),
+					"Live Tables' remove veto: a property a recipes.txt line names (or a row before it, which would move it) is refused, naming the line and cell; a row no line names may go (" + std::string(whyNamed) + " | " + whyStat + ")");
+				// a rename (Live Tables API 3): recipes.txt follows the code after a dated copy, and so do the
+				// book's unsaved rows; the cube's record keeps the row's number
+				{
+					const auto fakeRename = reinterpret_cast<int(__cdecl*)(int, uint64_t, const char*, const char*)>(reinterpret_cast<void*>(GetProcAddress(liveTables, "FakeRename")));
+					CreateDirectoryA((own + "\\templates").c_str(), nullptr);
+					const std::string templateRename = own + "\\templates\\Renamed One.txt";
+					WriteText(templateRename, ReadText(mineFile));
+					WriteText(notesFile, ReadText(mineFile));
+					const std::string fileBefore = ReadText(mineFile);
+					std::string       wanted     = fileBefore;
+					const size_t      at         = wanted.find("\tmy-prop\t");
+					wanted.replace(at, 9, "\tmy-prop2\t");
+					g_bookCommand(nullptr, &open, g_bookData);
+					Pump(150);
+					click("Row0");
+					click("Toggle"); // an unsaved change: the book's rows are not the file's
+					const bool unsaved = Widget("DoSave") == "[ Save (1) ]";
+					const size_t renamedLog = g_log.size();
+					fakeMake("my-prop2", 903);
+					const bool called = fakeRename != nullptr && fakeRename(1, 903, "my-prop", "my-prop2") == 1;
+					Pump(4000, [&] { return ReadText(mineFile).find("my-prop2") != std::string::npos && Logged("the recipe book: property my-prop is now my-prop2", renamedLog); });
+					std::string      copyName, copyText;
+					WIN32_FIND_DATAA entry {};
+					const HANDLE     find = FindFirstFileA((own + "\\recipes.before-rename-*.txt").c_str(), &entry);
+					if (find != INVALID_HANDLE_VALUE) {
+						copyName = entry.cFileName;
+						copyText = ReadText(own + "\\" + copyName);
+						FindClose(find);
+					}
+					Check(called && at != std::string::npos && ReadText(mineFile) == wanted && copyText == fileBefore && copyName.size() == std::string("recipes.before-rename-20261125-220000.txt").size()
+							&& Logged(("recipes.txt: property my-prop is now my-prop2 - 1 cell rewritten (line 2 (made) mod 1); the file before: " + copyName).c_str(), renamedLog) && hasNumber(903),
+						"a property renamed by Live Tables: a dated copy of recipes.txt first, then the code rewritten in the cell that named it and nothing else; the cube keeps the row (" + copyName + ")");
+					std::string tcopyName;
+					const HANDLE tfind = FindFirstFileA((own + "\\templates\\before-rename\\Renamed One.before-rename-*.txt").c_str(), &entry);
+					if (tfind != INVALID_HANDLE_VALUE) {
+						tcopyName = entry.cFileName;
+						FindClose(tfind);
+					}
+					std::string dcopyName;
+					const HANDLE dfind = FindFirstFileA((own + "\\deleted.before-rename-*.txt").c_str(), &entry);
+					if (dfind != INVALID_HANDLE_VALUE) {
+						dcopyName = entry.cFileName;
+						FindClose(dfind);
+					}
+					Check(ReadText(templateRename) == wanted && ReadText(notesFile) == wanted && !tcopyName.empty() && ReadText(own + "\\templates\\before-rename\\" + tcopyName) == fileBefore
+							&& !dcopyName.empty() && ReadText(own + "\\" + dcopyName) == fileBefore
+							&& Logged("templates\\Renamed One.txt: property my-prop is now my-prop2 - 1 cell rewritten", renamedLog) && Logged("deleted.txt: property my-prop is now my-prop2 - 1 cell rewritten", renamedLog),
+						"a rename rewrites deleted.txt and every template the same way (dated copies: deleted.before-rename-..., templates\\before-rename\\, out of the template list)");
+					click("Row0");
+					bool shown = false;
+					for (int n = 0; n < 40 && !shown; ++n) {
+						shown = Widget(("Name" + std::to_string(n)).c_str()) == "mod 1" && Widget(("Value" + std::to_string(n)).c_str()) == "my-prop2";
+					}
+					click("Back");
+					Check(unsaved && shown && Widget("DoSave") == "[ Save (1) ]" && Logged("the recipe book: property my-prop is now my-prop2 - 1 cell of its rows rewritten (not saved yet)", renamedLog),
+						"the recipe book's unsaved rows follow the rename too (the change stays unsaved)");
+					click("Discard");
+					page(VK_ESCAPE);
+					DeleteFileA((own + "\\" + copyName).c_str());
+					DeleteFileA((own + "\\" + dcopyName).c_str());
+					DeleteFileA((own + "\\templates\\before-rename\\" + tcopyName).c_str());
+					RemoveDirectoryA((own + "\\templates\\before-rename").c_str());
+					DeleteFileA(templateRename.c_str());
+					WriteText(notesFile, "");
+				}
+			}
+		}
 		// back to an empty file for what follows
 		WriteText(mineFile, Join(std::vector<std::string> { mine[0] }));
 		WriteText(notesFile, "");
@@ -1546,6 +1732,7 @@ int main(int argc, char** argv) {
 	Check(rotw->rows == foreign && rotw->count == 10 && Consoled("something else replaced", consoleFrom), "a list the plugin does not know is not touched");
 
 	Check(modState() == modBefore, "nothing in the mod's folder was added, removed or changed");
+	Check(!Logged("is too long for"), "every action button's label fits its slots (at most 12 letters in one slot, 28 in two; the plugin logs any that does not)");
 	static_cast<void>(logFrom);
 
 	unload();

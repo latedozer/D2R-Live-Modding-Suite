@@ -13,7 +13,9 @@
 //
 // What the edits are: d2rloader\live-suite\live-properties\<mod>\ (property-edits.txt,
 // stat-edits.txt, affix-edits.txt, string-keys.txt) and live-cube-recipes\<mod>\ (recipes.txt,
-// recipes-classic-lod.txt). The logic is export_core.cpp. Nothing is written outside
+// recipes-classic-lod.txt). Made stats and properties: only the rows Live Properties' API says
+// the game has this start (live_props_api.h version 2, listMade), at those numbers; no filler rows.
+// The logic is export_core.cpp. Nothing is written outside
 // d2rloader\live-suite\mod-export; the mod's own folder is only read.
 //
 // Console (Ctrl + `): export | export mpq [name] [plain] | export d2rmm [name]
@@ -24,8 +26,11 @@
 #include "export_core.h"
 
 #include "../Mod Book/mod_book_api.h"
+#include "../Live Properties Mod/live_props_api.h"
+#include "../Live Tables/live_tables_api.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 
 #include <CascLib.h>
 
@@ -39,7 +44,8 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.2.0";
+constexpr const char* kVersion = "0.3.4";
+extern "C" __declspec(dllexport) const char LiveSuiteVersion[] = "d2rl-live-export 0.3.4"; // install.sh reads it (strings)
 
 const D2RL::PluginContext*   g_ctx     = nullptr;
 const D2RL::ThreadService*   g_threads = nullptr;
@@ -250,6 +256,8 @@ struct Sources {
 	std::wstring exalted; // Exalted Items' adjusted copies (its data folder), "" = none
 	std::wstring live;    // d2rloader\live-suite
 	std::string  modName;
+	bool                 hasIds = false; // Exalted Items' stat-ids.txt (1.3.0 and later) was read
+	exporter::ExaltedIds ids;
 };
 
 bool FindSources(Sources& s, std::string& problem) {
@@ -266,7 +274,92 @@ bool FindSources(Sources& s, std::string& problem) {
 			s.exalted = place;
 		}
 	}
+	// Exalted Items' stat numbers, beside its codes.txt: which rows are its own, which are made stats
+	s.hasIds = false;
+	for (const std::wstring& place : { loader + L"\\exalted-items\\" + Widen(s.modName), Widen("") + (g_ctx->modDirectory != nullptr ? g_ctx->modDirectory : L"") + L"\\d2rloader\\exalted-items\\" + Widen(s.modName) }) {
+		std::string text, why;
+		if (!s.hasIds && ReadWhole(place + L"\\stat-ids.txt", text)) {
+			s.hasIds = exporter::ReadExaltedIds(text, s.ids, why);
+			if (!s.hasIds) {
+				LogF("Exalted Items' stat-ids.txt is not used: %s", why.c_str());
+			}
+		}
+	}
 	return true;
+}
+
+// The rows Live Properties really added to the game's tables this start (its API, version 2:
+// listMade), with their numbers. Its files only give their cells.
+void AskLiveProperties(exporter::Edits& edits) {
+	edits.madeStatRows.clear(), edits.madeStatRowsBase.clear(), edits.madePropRows.clear();
+	const liveprops::Api* api = liveprops::Find();
+	if (api == nullptr) {
+		edits.liveProps = GetModuleHandleW(L"d2rl-live-properties.dll") != nullptr ? exporter::LiveProps::old : exporter::LiveProps::missing;
+		return;
+	}
+	if (api->version < 2 || api->size < offsetof(liveprops::Api, listMade) + sizeof(api->listMade) || api->listMade == nullptr) {
+		edits.liveProps = exporter::LiveProps::old;
+		return;
+	}
+	edits.liveProps  = exporter::LiveProps::ok;
+	const auto list = [&](liveprops::Table table, int dataVersion, std::vector<exporter::MadeRow>& out) {
+		std::vector<liveprops::MadeRow> rows(api->listMade(table, dataVersion, nullptr, 0));
+		if (!rows.empty()) {
+			const size_t got = api->listMade(table, dataVersion, rows.data(), rows.size());
+			rows.resize(got < rows.size() ? got : rows.size());
+		}
+		for (const liveprops::MadeRow& r : rows) {
+			out.push_back({ std::string(r.name, strnlen(r.name, sizeof(r.name))), r.number });
+		}
+	};
+	list(liveprops::Table::stats, 0, edits.madeStatRows);     // the main tables: the newest data version that is on
+	list(liveprops::Table::stats, 2, edits.madeStatRowsBase); // base\: classic / LoD
+	list(liveprops::Table::properties, 0, edits.madePropRows);
+	LogF("Live Properties lists %zu made stats (%zu in base\\), %zu made properties in the game this start", edits.madeStatRows.size(), edits.madeStatRowsBase.size(), edits.madePropRows.size());
+}
+
+// Live Tables' rows this start: its files give the rows' names and cells, its API (find,
+// isDisabled) whether and where the game has them. Game or UI thread (Start is called there).
+std::string AskLiveTables(const Sources& s, exporter::Edits& edits) {
+	const std::wstring folder = s.live + L"\\live-tables\\" + Widen(s.modName);
+	std::string        text, notes;
+	edits.grown.clear(), edits.statsOff.clear();
+	const livetables::Api* api = livetables::Find();
+	edits.liveTables           = api == nullptr ? (GetModuleHandleW(L"d2rl-live-tables.dll") != nullptr ? exporter::LiveTables::old : exporter::LiveTables::missing)
+	                                            : api->version >= 2 && api->isDisabled != nullptr ? exporter::LiveTables::ok : exporter::LiveTables::old;
+	if (api == nullptr) {
+		return notes;
+	}
+	const auto main = [&](livetables::Table t) { return api->count(t, 3) >= 0 ? 3 : 2; }; // the main tables: the newest data version read
+	if (ReadWhole(folder + L"\\grown-rows.txt", text)) {
+		for (const std::string& b : exporter::ReadGrownRows(text, edits)) {
+			notes += b + "\n";
+		}
+	}
+	for (exporter::GrownRow& g : edits.grown) {
+		const livetables::Table t = g.stat ? livetables::Table::ItemStatCost : livetables::Table::Properties;
+		g.number                  = api->find(t, main(t), g.name.c_str());
+		g.baseNumber              = api->find(t, 2, g.name.c_str());
+	}
+	if (edits.liveTables == exporter::LiveTables::ok && ReadWhole(folder + L"\\disabled-rows.txt", text)) {
+		for (const std::string& b : exporter::ReadDisabledRows(text, edits)) {
+			notes += b + "\n";
+		}
+		std::vector<exporter::StatOff> off;
+		for (exporter::StatOff o : edits.statsOff) {
+			const int m = main(livetables::Table::ItemStatCost);
+			o.number     = api->find(livetables::Table::ItemStatCost, m, o.name.c_str());
+			o.baseNumber = api->find(livetables::Table::ItemStatCost, 2, o.name.c_str());
+			if ((o.number >= 0 && api->isDisabled(livetables::Table::ItemStatCost, m, o.number) == 1) || (o.baseNumber >= 0 && api->isDisabled(livetables::Table::ItemStatCost, 2, o.baseNumber) == 1)) {
+				off.push_back(o);
+			} else {
+				notes += "disabled-rows.txt: " + o.name + " is not disabled in the game this start; not exported as disabled\n";
+			}
+		}
+		edits.statsOff = off;
+	}
+	LogF("Live Tables: %zu grown rows, %zu disabled stats in the game this start", edits.grown.size(), edits.statsOff.size());
+	return notes;
 }
 
 std::string ReadEdits(const Sources& s, exporter::Edits& edits) {
@@ -282,7 +375,19 @@ std::string ReadEdits(const Sources& s, exporter::Edits& edits) {
 	}
 	if (ReadWhole(props + L"\\stat-edits.txt", text)) {
 		take(exporter::ReadStatEdits(text, edits));
+		exporter::MarkMadeStats(edits, s.hasIds ? &s.ids : nullptr);
 	}
+	AskLiveProperties(edits);
+	if (ReadWhole(props + L"\\made-properties.txt", text)) { // Live Properties 0.9.0: properties made there
+		exporter::ReadMadeProperties(text, edits);
+	}
+	if (ReadWhole(props + L"\\property-off.txt", text)) {
+		exporter::ReadPropertyOff(text, edits);
+	}
+	if (ReadWhole(props + L"\\affix-off.txt", text)) {
+		take(exporter::ReadAffixOff(text, edits));
+	}
+	notes += AskLiveTables(s, edits);
 	if (ReadWhole(props + L"\\affix-edits.txt", text)) {
 		take(exporter::ReadAffixEdits(text, edits));
 	}
@@ -335,6 +440,10 @@ void MapStatStrings(const Sources& s, bool withExalted, exporter::Edits& edits) 
 	const char     nonsense[] = "live-export:NoSuchKey";
 	const View     none { nonsense, sizeof(nonsense) - 1 };
 	const uint16_t unknown = lookup(&none);
+	const char     dummy[] = "dummy";
+	const View     dummyKey { dummy, sizeof(dummy) - 1 };
+	edits.noString = { unknown, lookup(&dummyKey) }; // what the game gives an empty or unknown key (5382 'dummy', "an evil force")
+	LogF("the game's 'no string' number: %u ('dummy': %u)", unknown, lookup(&dummyKey));
 	for (const char* table : { "global\\excel\\itemstatcost.txt", "global\\excel\\base\\itemstatcost.txt" }) {
 		std::string   text;
 		exporter::Tsv tsv;
@@ -400,6 +509,18 @@ int                 g_tab  = 0;
 
 void Tell(const std::vector<std::string>& lines);
 
+// Lines of the edit files that could not be read: things the export cannot carry.
+void TakeNotes(const Job& job, exporter::Report& report) {
+	for (size_t at = 0; at < job.notes.size();) {
+		const size_t end = job.notes.find('\n', at);
+		const std::string line = job.notes.substr(at, end == std::string::npos ? std::string::npos : end - at);
+		if (!line.empty()) {
+			report.problems.push_back(line);
+		}
+		at = end == std::string::npos ? job.notes.size() : end + 1;
+	}
+}
+
 std::string ReportText(const exporter::Report& report) {
 	std::string text;
 	for (const std::string& d : report.done) {
@@ -432,8 +553,10 @@ void ExportMpq(Job& job) {
 		storage = nullptr;
 	}
 	exporter::Report report;
+	TakeNotes(job, report);
+	exporter::TakeMadeRows(job.edits, report); // made rows: only those in the game this start, at their numbers
 	if (!withExalted) { // a plain mod: Exalted Items makes its own rows again at every start
-		exporter::LeaveOutExaltedRows(job.edits, report);
+		exporter::LeaveOutExaltedRows(job.edits, report, job.sources.hasIds ? &job.sources.ids : nullptr);
 	}
 	// the tables (the main ones; the older data sets' base\ copies when the mod has them)
 	const auto table = [&](const std::string& path, bool always, const auto& change) {
@@ -465,16 +588,19 @@ void ExportMpq(Job& job) {
 	const auto isKey = [&](const std::string& word) { return keys.count(word) != 0; };
 	for (const char* folder : { "global\\excel\\", "global\\excel\\base\\" }) {
 		const bool main = strcmp(folder, "global\\excel\\") == 0;
-		if (!e.props.empty()) {
+		if (!e.props.empty() || !e.madeProps.empty() || !e.propsOff.empty()) {
 			table(std::string(folder) + "properties.txt", main, [&](exporter::Tsv& t) { exporter::ApplyProperties(t, e, report); return true; });
 		}
-		if (!e.stats.empty()) {
-			table(std::string(folder) + "itemstatcost.txt", main, [&](exporter::Tsv& t) { exporter::ApplyStats(t, e, true, report); return true; });
+		if (!e.stats.empty() || !e.statsOff.empty()) {
+			table(std::string(folder) + "itemstatcost.txt", main, [&](exporter::Tsv& t) { exporter::ApplyStats(t, e, !main, report); return true; });
 		}
 		static const char* const affixFiles[] = { "magicsuffix.txt", "magicprefix.txt", "automagic.txt" };
 		for (int kind = 0; kind < 3; ++kind) {
 			bool any = false;
 			for (const exporter::AffixEdit& a : e.affixes) {
+				any = any || a.kind == kind;
+			}
+			for (const exporter::AffixOff& a : e.affixesOff) {
 				any = any || a.kind == kind;
 			}
 			if (any) {
@@ -541,13 +667,34 @@ void ExportMpq(Job& job) {
 	WriteExport(mpq + L"\\modinfo.json", "{\n  \"name\": \"" + job.name + "\",\n  \"savepath\": \"" + (savepath.empty() ? job.name + "/" : savepath) + "\"\n}\n");
 	const std::string about = "Live Export " + std::string(kVersion) + ": " + job.name + ".mpq made from the mod '" + job.sources.modName + "'" + (withExalted ? " with Exalted Items' table copies" : " (plain: without Exalted Items' copies)")
 	                        + "\r\n" + std::to_string(files) + " files of the mod" + (withExalted ? ", " + std::to_string(exaltedFiles) + " of Exalted Items" : "") + "\r\n\r\n" + ReportText(report)
-	                        + (job.notes.empty() ? "" : "\r\nSkipped lines:\r\n" + job.notes)
 	                        + "\r\nTo play it: copy the folder '" + job.name + "' into the game's mods folder and start the game with -mod " + job.name + ".\r\n"
-	                        + (withExalted ? "It already holds Exalted Items' rows. Keep the Exalted Items plugin ON (version 1.1.0 or later): it sees that and uses the exported tables as they are, adding only its game hooks (unique and set drops, the restore strip, the loot filter box). An older Exalted Items would add its rows a second time.\r\n" : "");
+	                        + (withExalted ? "It already holds Exalted Items' rows. Keep the Exalted Items plugin ON (version 1.1.0 or later): it sees that and uses the exported tables as they are, adding only its game hooks (unique and set drops, the restore strip, the loot filter box). An older Exalted Items would add its rows a second time.\r\n" : "")
+	                        + "\r\n" + exporter::CouldNotCarry(report) + "\r\n";
 	WriteExport(out + L"\\export-report.txt", about);
 	LogF("%s", about.c_str());
 	Tell({ "Live Export: " + job.name + ".mpq written (" + std::to_string(files + exaltedFiles) + " files, " + std::to_string(report.done.size()) + " changes in, " + std::to_string(report.problems.size()) + " left out)",
 		"  " + Narrow(out) + "  (export-report.txt says what is in it)" });
+}
+
+// A disabled affix's name as the game read it (the D2RMM mod checks the row by it).
+void NameOffAffixes(Job& job, HANDLE storage) {
+	static const char* const files[] = { "global\\excel\\magicsuffix.txt", "global\\excel\\magicprefix.txt", "global\\excel\\automagic.txt" };
+	for (int kind = 0; kind < 3; ++kind) {
+		exporter::Tsv t;
+		std::string   text;
+		bool          read = false;
+		for (exporter::AffixOff& off : job.edits.affixesOff) {
+			if (off.kind != kind) {
+				continue;
+			}
+			if (!read) {
+				read = ReadTable(job.sources, true, storage, files[kind], text) && exporter::ParseTsv(text, t);
+			}
+			if (read && off.index < t.rows.size()) {
+				off.was = t.At(off.index, "Name");
+			}
+		}
+	}
 }
 
 void ExportD2rmm(Job& job) {
@@ -578,14 +725,17 @@ void ExportD2rmm(Job& job) {
 		CascCloseStorage(storage);
 	}
 	exporter::Report report;
-	exporter::LeaveOutExaltedRows(job.edits, report); // D2RMM's tables never hold them; Exalted Items makes them at start
+	TakeNotes(job, report);
+	exporter::TakeMadeRows(job.edits, report);
+	NameOffAffixes(job, storage);
+	exporter::LeaveOutExaltedRows(job.edits, report, job.sources.hasIds ? &job.sources.ids : nullptr); // D2RMM's tables never hold them; Exalted Items makes them at start
 	const std::string ts   = exporter::D2rmmTs(job.edits, cube, cubeBase, [&](const std::string& w) { return keys.count(w) != 0; }, report);
 	const std::string json = exporter::D2rmmJson(job.name, "1.0", "The changes made in the game with the Live Suite (made from the mod '" + job.sources.modName + "'). Install it after the mods it was made with.");
 	const bool        ok   = WriteExport(out + L"\\mod.ts", ts) && WriteExport(out + L"\\mod.json", json);
 	const std::string about = "Live Export " + std::string(kVersion) + ": the D2RMM mod '" + job.name + "' made from the mod '" + job.sources.modName + "'\r\n\r\n" + ReportText(report)
-	                        + (job.notes.empty() ? "" : "\r\nSkipped lines:\r\n" + job.notes)
 	                        + "\r\nTo use it: copy the folder '" + job.name + "-d2rmm' into D2RMM's mods folder (rename it as you like), put it after the mods it was made with, install.\r\n"
-	                        + "A stat made in the game keeps its number: the mod fills the stat table with empty rows (live_unused_<n>) up to it, and stops if another mod already has a stat there.\r\n";
+	                        + "A stat made in the game keeps its number: the mod adds it right after the stat table's last row, and stops without changing anything if the table there does not end right before it (another mod added or took out stats). It never writes filler rows.\r\n"
+	                        + "\r\n" + exporter::CouldNotCarry(report) + "\r\n";
 	WriteExport(out + L"\\export-report.txt", about);
 	LogF("%s", about.c_str());
 	Tell({ ok ? "Live Export: the D2RMM mod '" + job.name + "' written (" + std::to_string(report.done.size()) + " changes, " + std::to_string(report.problems.size()) + " left out)" : "Live Export: the D2RMM mod could not be written",
@@ -716,16 +866,46 @@ D2RL::ConsoleCommandResult __cdecl OnConsole(D2R::Game::Client*, const D2RL::Con
 
 std::string g_typed; // the name typed in the tab (UI thread)
 
+// The tab's buttons on the Mod Book's action row (slots 232 wide, 4 to a row under the tab rows,
+// the same places as on every tab); an older Mod Book: the same places, by hand. The answer: the
+// first y under the rows so far.
+struct Actions {
+	modbook::Page* page;
+	int            next = 0, rowY = modbook::kActionY;
+	int add(const char* click, const char* text, const char* color, int slots) {
+		if (modbook::HasRows(g_book)) {
+			return g_book->action(page, click, text, color, slots);
+		}
+		slots = slots < 1 ? 1 : slots > modbook::kActionsInRow ? modbook::kActionsInRow : slots;
+		if (next + slots > modbook::kActionsInRow) {
+			next = 0;
+			rowY += modbook::kActionRowStep;
+		}
+		static const int widths[] = { 232, 470, 700, 742 };
+		g_book->button(page, click, 82 + next * (modbook::kActionSlot + modbook::kActionGap), rowY, widths[slots - 1], text, color != nullptr ? color : "$FontColorGoldYellow");
+		next += slots;
+		return rowY + modbook::kActionRowStep;
+	}
+};
+
 void __cdecl TabDraw(void*, modbook::Page* page) noexcept {
-	const std::string mod = ModName();
-	g_book->label(page, "About", 82, 150, 990, 100, "$FontColorGoldYellow", "left", 1,
+	const std::string mod  = ModName();
+	const std::string name = g_typed.empty() ? mod + "-live" : g_typed;
+	// the name, where every tab has its search box
+	g_book->label(page, "NameHead", 82, 166, 120, 56, "$FontColorGoldYellow", "left", 0, "Name:");
+	if (modbook::HasRows(g_book)) {
+		g_book->search(page, name.c_str(), "Type a name for the export");
+	} else {
+		g_book->image(page, "NameSlot", 210, 138, "PANEL\\Modals\\InputSlot");
+		g_book->label(page, "Name", 250, 166, 660, 56, "$FontColorWhite", "left", 0, (name + "_").c_str());
+	}
+	Actions row { page };
+	int     under = modbook::kActionY;
+	for (const exporter::ActionButton& b : exporter::kExportButtons) {
+		under = row.add(b.click, b.text, b.color, b.slots);
+	}
+	g_book->label(page, "About", 82, under, 990, 100, "$FontColorGoldYellow", "left", 1,
 		("Writes the mod '" + (mod.empty() ? std::string("(none)") : mod) + "' with your Live Suite edits (property, stat and affix rows, the cube list) into d2rloader\\live-suite\\mod-export.").c_str());
-	g_book->label(page, "NameHead", 82, 300, 200, 40, "$FontColorGoldYellow", "left", 0, "Name:");
-	g_book->image(page, "NameSlot", 210, 272, "PANEL\\Modals\\InputSlot");
-	g_book->label(page, "Name", 250, 300, 660, 56, "$FontColorWhite", "left", 0, ((g_typed.empty() ? mod + "-live" : g_typed) + "_").c_str());
-	g_book->button(page, "Mpq", 82, 420, 480, "The whole mod (.mpq)", "$FontColorGreen");
-	g_book->button(page, "Plain", 592, 420, 480, ".mpq without Exalted copies", "$FontColorLightTeal");
-	g_book->button(page, "D2rmm", 82, 500, 480, "A D2RMM mod (.ts + .json)", "$FontColorGreen");
 	std::vector<std::string> status;
 	AcquireSRWLockShared(&g_lock);
 	status = g_status;
@@ -734,7 +914,7 @@ void __cdecl TabDraw(void*, modbook::Page* page) noexcept {
 	for (const std::string& line : status) {
 		text += line + "\n";
 	}
-	g_book->label(page, "Status", 82, 600, 990, 400, "$FontColorLightGold", "left", 1,
+	g_book->label(page, "Status", 82, under + 110, 990, 400, "$FontColorLightGold", "left", 1,
 		(text.empty() ? std::string("Type a name (letters, digits, spaces, - and _), then a button. The .mpq is a copy of the whole mod with the edits written in, Exalted Items' table copies included unless you take the plain one. The D2RMM mod makes the same edits on top of other mods.") : text).c_str());
 }
 void __cdecl TabClick(void*, const char* what) noexcept {
@@ -803,11 +983,47 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 	return &kPluginInfo;
 }
 
+// The sha256 of this DLL's file, as sha256sum prints it ("" when it cannot be read), so the log
+// says which build ran (suite rule, lead-71 2026-11-25).
+std::string OwnSha256(std::wstring& path) {
+	HMODULE self = nullptr;
+	wchar_t name[1024] = {};
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&OwnSha256), &self)
+	    || GetModuleFileNameW(self, name, 1000) == 0) {
+		return "";
+	}
+	path = name;
+	std::string bytes;
+	if (!ReadWhole(path, bytes)) {
+		return "";
+	}
+	BCRYPT_ALG_HANDLE algorithm  = nullptr;
+	uint8_t           digest[32] = {};
+	bool              ok         = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0;
+	ok = ok && BCryptHash(algorithm, nullptr, 0, reinterpret_cast<PUCHAR>(bytes.data()), static_cast<ULONG>(bytes.size()), digest, sizeof(digest)) == 0;
+	if (algorithm != nullptr) {
+		BCryptCloseAlgorithmProvider(algorithm, 0);
+	}
+	if (!ok) {
+		return "";
+	}
+	char hex[65] = {};
+	for (int i = 0; i < 32; ++i) {
+		snprintf(hex + i * 2, 3, "%02x", digest[i]);
+	}
+	return hex;
+}
+
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
 	if (context == nullptr || context->GetApi() == nullptr) {
 		return false;
 	}
 	g_ctx = context;
+	{
+		std::wstring      path;
+		const std::string sha = OwnSha256(path);
+		LogF("d2rl-live-export.dll %s sha256 %s (%s)", kVersion, sha.empty() ? "unknown (the file could not be read)" : sha.c_str(), Narrow(path).c_str());
+	}
 	if (context->QueryService(&g_threads) != D2RL::ServiceQueryResult::Success || !D2RL::HasThreadServiceField(g_threads, D2RL::ThreadServiceRequiredSize)) {
 		g_threads = nullptr;
 	}

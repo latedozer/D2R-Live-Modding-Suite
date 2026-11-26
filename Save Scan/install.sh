@@ -22,7 +22,20 @@ if [ "${1:-}" = "remove" ]; then
 	exit 0
 fi
 [ -f build/d2rl-save-scan.dll ] || { echo "build it first: ./build.sh"; exit 1; }
+# the DLL installed now goes to the release folder's previous/ (with its version and hash in the name)
+PREV="../Suite .dlls/previous"
+VERSION=$(grep -o 'kVersion = "[^"]*"' plugin.cpp | cut -d'"' -f2)
+SHA=$(sha256sum build/d2rl-save-scan.dll | cut -d' ' -f1)
+if [ -f "$DEST/d2rl-save-scan.dll" ]; then
+	OLDSHA=$(sha256sum "$DEST/d2rl-save-scan.dll" | cut -d' ' -f1)
+	mkdir -p "$PREV"
+	cp "$DEST/d2rl-save-scan.dll" "$PREV/d2rl-save-scan.$(date +%Y%m%d-%H%M%S).${OLDSHA:0:12}.dll"
+	echo "the one installed before: $PREV/d2rl-save-scan.$(date +%Y%m%d-%H%M%S).${OLDSHA:0:12}.dll"
+fi
 cp build/d2rl-save-scan.dll "$DEST/d2rl-save-scan.dll.installing"
 mv "$DEST/d2rl-save-scan.dll.installing" "$DEST/d2rl-save-scan.dll"
 ls -la "$DEST/d2rl-save-scan.dll"
-echo "installed. It works only when asked: console command savescan."
+mkdir -p "$GAME/d2rloader/live-suite"
+printf '%s\tsave-scan\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$VERSION" "$SHA" >> "$GAME/d2rloader/live-suite/installed.txt"
+echo "recorded in d2rloader/live-suite/installed.txt: save-scan $VERSION $SHA"
+echo "installed. It works only when asked (console: savescan) and checks the saves at the main menu."

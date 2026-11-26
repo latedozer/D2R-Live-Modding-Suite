@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
 # Save Scan: reads every saved item when another plugin (or the console command savescan)
 # asks which items hold a stat. It does nothing otherwise and has no settings.
-# Saves are only read. What it writes on request: d2rloader\save-scan\<mod>\items.txt
+# Saves are read, and rewritten only when a plugin asks for it (fixSaves: a stat removed, renumbered
+# or resized), after a dated backup in d2rloader\live-suite\save-scan\<mod>\backup-<date>.
+# Also written on request: d2rloader\live-suite\save-scan\<mod>\items.txt

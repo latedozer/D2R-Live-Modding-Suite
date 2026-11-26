@@ -100,6 +100,34 @@ __pycache__/
 !/Live Export/test/*.mjs
 !/Live Export/test/*.sh
 
+# Live Tables plugin: own source, scripts, tests only (build/ holds copied game tables and dumps: never committed).
+!/Live Tables/
+/Live Tables/*
+!/Live Tables/*.cpp
+!/Live Tables/*.h
+!/Live Tables/*.sh
+!/Live Tables/*.rc
+!/Live Tables/*.toml
+!/Live Tables/*.md
+!/Live Tables/test/
+/Live Tables/test/*
+!/Live Tables/test/*.cpp
+!/Live Tables/test/*.sh
+
+# Live Strings plugin: own source, scripts, tests only (build/ holds copied game tables and dumps: never committed).
+!/Live Strings/
+/Live Strings/*
+!/Live Strings/*.cpp
+!/Live Strings/*.h
+!/Live Strings/*.sh
+!/Live Strings/*.rc
+!/Live Strings/*.toml
+!/Live Strings/*.md
+!/Live Strings/test/
+/Live Strings/test/*
+!/Live Strings/test/*.cpp
+!/Live Strings/test/*.sh
+
 # The release folder: the built DLLs, their READMEs, the third-party notices and license texts.
 !/Suite .dlls/
 /Suite .dlls/*

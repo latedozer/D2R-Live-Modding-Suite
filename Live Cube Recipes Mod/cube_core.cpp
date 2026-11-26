@@ -1009,8 +1009,19 @@ std::string Legend(const LegendTables& tables, std::vector<Shown>* codes, std::v
 			return;
 		}
 		Shown shown;
-		shown.title  = meaning.empty() ? code : code + "  -  " + meaning;
-		shown.detail = detail;
+		shown.title   = meaning.empty() ? code : code + "  -  " + meaning;
+		shown.detail  = detail;
+		shown.code    = code;
+		shown.meaning = meaning;
+		if (!value) { // a word or code: itself, unless the entry names several ("a / b")
+			shown.insert = code.find(" / ") == std::string::npos ? code : std::string();
+		} else { // a column's explanation: only "op 18" and "stat 370" stand for something to type, the number
+			const size_t space = code.find(' ');
+			if (space != std::string::npos && space + 1 < code.size() && (code.compare(0, space, "op") == 0 || code.compare(0, space, "stat") == 0)
+				&& code.find_first_not_of("0123456789", space + 1) == std::string::npos) {
+				shown.insert = code.substr(space + 1);
+			}
+		}
 		shown.search = shown.title + " " + shown.detail;
 		for (char& c : shown.search) {
 			c = c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c;
@@ -1188,6 +1199,25 @@ std::string Legend(const LegendTables& tables, std::vector<Shown>* codes, std::v
 	return out;
 }
 
+std::vector<HowItWorks> LegendHow(int section) {
+	if (section == 0) {
+		return {
+			{ "Reading a recipe", "A recipe's description is free text by whoever wrote it; what counts are its cells. In many descriptions the words between the dashes repeat the first input cell: \"Ancients' Pledge - rare - shld - RalOrtTal\" has input 1 = \"shld,rar\", a rare item of type shld." },
+			{ "Words in an input cell", "The first word says what goes into the cube: an item code (r10 = that very item), an item type code (shld = any shield), a unique or set item's name, or any. The words after it, separated by commas, narrow it down: qty=3, a quality (low nor hiq mag rar set uni crf tmp), sock=2 or nos, eth or noe, bas exc eli, upg, nru, id." },
+			{ "Words in an output cell", "The first word says what comes out: useitem (input 1 itself, kept and changed), usetype (a new item of input 1's kind), an item or item type code, a unique or set item's name, or a portal (Cow Portal, Pandemonium Portal, Pandemonium Finale Portal, Red Portal). The words after it give its quality, qty, pre= / suf= (a magic prefix or suffix number), sock=, eth, mod (keeps input 1's properties), uns / rem (empties sockets), reg, exc / eli, rep, rch." },
+			{ "Item types include others", "An item type code also stands for every type listed under \"includes\" in its entry: armo includes shld and head, so an input of armo takes a shield too." },
+			{ "Putting a code into a cell", "While a recipe is open in the editor, a click on an entry puts its code into the cell being typed into: in an input or output cell after a comma (inside the quotes when there are quotes), in any other cell in place of what is there." },
+		};
+	}
+	return {
+		{ "The columns of a recipe", "enabled (1 on, 0 off), min diff (0 all, 1 Nightmare and Hell, 2 Hell), version (0 also classic, 100 expansion only), class (only that class), numinputs (every item counted: r10,qty=3 counts 3), input 1 - 7 (what goes in), output, output b, output c (up to three things come out), firstLadderSeason / lastLadderSeason (blank = always). As Blizzard's data guide for cubemain.txt describes them." },
+		{ "Item level: lvl, plvl, ilvl", "The item level the first output is made with (it decides which properties it can get). lvl is a fixed level; when it is filled in, plvl and ilvl are ignored. plvl is percent of the player's level, ilvl percent of input 1's item level; the two are added. b lvl / b plvl / b ilvl are the same for output b, c lvl ... for output c." },
+		{ "Conditions: op, param, value", "One extra condition: op says which kind (op 1 - 28), param and value are its two numbers; blank op = none. Where a stat is meant, param is the stat's number in ItemStatCost.txt (the stat entries). Example: op 18, param 370, value 0 = stat 370 of the item put in must be 0." },
+		{ "Properties: mod 1 - 5", "Up to five properties for the first output (b mod 1 - 5 for output b, c mod 1 - 5 for output c). Each has five cells: mod 1 (a property code or property group code), mod 1 chance (percent; blank or 0 = always), mod 1 param (when the property needs one, such as a skill), mod 1 min and mod 1 max (the amount; the same = exactly that). The word mod inside an output cell is something else: keep input 1's properties." },
+		{ "Putting a number into a cell", "A click on an op entry or a stat entry puts its number into the cell being typed into (op 18 puts 18, stat 370 puts 370). The other entries here explain a column and put nothing in." },
+	};
+}
+
 int ColumnIndex(const char* name) {
 	for (size_t c = 0; c < kColumnCount; ++c) {
 		if (SameName(name, kColumns[c].name)) {
@@ -1258,6 +1288,144 @@ std::string CompleteHeader() {
 	return FullHeader() + "\t*complete";
 }
 
+std::vector<std::string> AmountNotes(const Header& header, std::string_view line) {
+	std::vector<std::string> notes;
+	CellViews                cells;
+	SplitCells(line, cells);
+	for (size_t c = 0; c + 4 < kColumnCount; ++c) {
+		if (kColumns[c].kind != Kind::Mod) {
+			continue;
+		}
+		// kColumns: "x mod N", then its chance, param, min and max
+		const std::string_view code = At(cells, header.cell[c]);
+		if (code.empty() || !At(cells, header.cell[c + 2]).empty() || !At(cells, header.cell[c + 3]).empty() || !At(cells, header.cell[c + 4]).empty()) {
+			continue;
+		}
+		const std::string name = kColumns[c].name;
+		notes.push_back(name + " " + std::string(code) + " has no amount: its min, max and param are blank (0), so the item gets nothing. Put the amount in " + name + " min and " + name + " max");
+	}
+	return notes;
+}
+
+namespace {
+
+bool SameText(std::string_view a, std::string_view b) { // any case, as the game's name tables (A-Z only)
+	if (a.size() != b.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < a.size(); ++i) {
+		const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c; };
+		if (lower(a[i]) != lower(b[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool NamesIn(const Column& column, bool stats) {
+	return stats ? column.kind == Kind::Param : column.kind == Kind::Mod;
+}
+
+}
+
+int RenameInText(std::string& text, bool stats, std::string_view oldName, std::string_view newName, std::vector<std::string>* where) {
+	if (oldName.empty() || newName.empty()) {
+		return 0;
+	}
+	const size_t firstEnd = text.find('\n');
+	if (firstEnd == std::string::npos) {
+		return 0;
+	}
+	const Header header = ReadHeader(std::string_view(text).substr(0, firstEnd));
+	std::vector<int> targets; // cells of the columns that may name it, with their kColumns index
+	std::vector<size_t> columnOf;
+	for (size_t c = 0; c < kColumnCount; ++c) {
+		if (NamesIn(kColumns[c], stats) && header.cell[c] >= 0) {
+			targets.push_back(header.cell[c]);
+			columnOf.push_back(c);
+		}
+	}
+	std::string out = text.substr(0, firstEnd + 1);
+	int         changed = 0;
+	size_t      line    = 0;
+	for (size_t start = firstEnd + 1; start < text.size(); ++line) {
+		size_t end = text.find('\n', start);
+		end        = end == std::string::npos ? text.size() : end + 1;
+		const std::string_view whole(text.data() + start, end - start);
+		std::string_view       body = whole;
+		std::string_view       tail;
+		while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) {
+			body.remove_suffix(1);
+		}
+		tail = whole.substr(body.size());
+		std::string rebuilt;
+		int         cell = 0;
+		bool        any  = false;
+		for (size_t from = 0;; ++cell) {
+			const size_t           tab   = body.find('\t', from);
+			const std::string_view piece = body.substr(from, tab == std::string_view::npos ? std::string_view::npos : tab - from);
+			bool                   hit   = false;
+			for (size_t t = 0; t < targets.size() && !hit; ++t) {
+				if (targets[t] == cell && SameText(Trim(piece), oldName)) {
+					hit = true;
+					if (where != nullptr) {
+						const std::string_view about = Cell(body, header.description);
+						where->push_back("line " + std::to_string(line + 2) + (about.empty() ? std::string() : " (" + std::string(about.substr(0, 45)) + ")") + " " + kColumns[columnOf[t]].name);
+					}
+				}
+			}
+			rebuilt += cell == 0 ? "" : "\t";
+			rebuilt += hit ? std::string(newName) : std::string(piece);
+			changed += hit ? 1 : 0;
+			any = any || hit;
+			if (tab == std::string_view::npos) {
+				break;
+			}
+			from = tab + 1;
+		}
+		out += any ? rebuilt + std::string(tail) : std::string(whole);
+		start = end;
+	}
+	if (changed != 0) {
+		text.swap(out);
+	}
+	return changed;
+}
+
+int RenameInCells(Cells& cells, bool stats, std::string_view oldName, std::string_view newName) {
+	int changed = 0;
+	for (size_t c = 0; c < kColumnCount && c < cells.cell.size(); ++c) {
+		if (NamesIn(kColumns[c], stats) && !oldName.empty() && !newName.empty() && SameText(Trim(cells.cell[c]), oldName)) {
+			cells.cell[c] = std::string(newName);
+			++changed;
+		}
+	}
+	return changed;
+}
+
+int NamesRow(const Layout& layout, const uint8_t* row, bool stats, uint32_t from) {
+	for (size_t c = 0; c < kColumnCount; ++c) {
+		const Column& column = kColumns[c];
+		const size_t  at     = Offset(layout, column.at);
+		if (stats && column.kind == Kind::Param) {
+			uint32_t param = 0;
+			memcpy(&param, row + at, sizeof(param));
+			const uint8_t op = row[Offset(layout, 0x3)];
+			if (op >= 3 && op <= 26 && param >= from && param != 0xffffffffu) { // ops 3-26: param is a stat (the legend's op list)
+				return static_cast<int>(c);
+			}
+		} else if (!stats && column.kind == Kind::Mod) {
+			uint16_t id = 0, kind = 0;
+			memcpy(&id, row + at, sizeof(id));
+			memcpy(&kind, row + at + 2, sizeof(kind));
+			if (id != 0xffff && kind == 0 && id >= from) { // kind != 0: a property group
+				return static_cast<int>(c);
+			}
+		}
+	}
+	return -1;
+}
+
 namespace {
 
 // A line's record, compiled once for its cells (RecordKey); nullptr when the game refuses it.
@@ -1314,6 +1482,11 @@ Outcome ExactList(Game& game, const Layout& layout, const Sheet& mine, Cache& ca
 			continue;
 		}
 		list.push_back(record->data());
+		for (std::string& note : AmountNotes(mine.header, text)) {
+			if (out.notes.size() < 20) {
+				out.notes.push_back(Describe(mine, i) + ": " + note);
+			}
+		}
 		out.status[i] = LineStatus::Added;
 		++out.added;
 		out.disabled += (*record)[0] == 0 ? 1 : 0;

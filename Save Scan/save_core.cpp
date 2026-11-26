@@ -86,7 +86,7 @@ int Followers(uint16_t stat) { // stats saved together with this one
 	return stat == 17 || stat == 48 || stat == 50 || stat == 52 ? 1 : stat == 54 || stat == 57 ? 2 : 0;
 }
 
-bool ReadStats(Bits& bits, const Tables& tables, std::vector<StatValue>& out, std::string& problem) {
+bool ReadStats(Bits& bits, const Tables& tables, std::vector<StatValue>& out, std::string& problem, uint8_t list) {
 	for (int guard = 0; guard < 512; ++guard) {
 		const uint16_t id = static_cast<uint16_t>(bits.take(9));
 		if (bits.bad) {
@@ -105,7 +105,7 @@ bool ReadStats(Bits& bits, const Tables& tables, std::vector<StatValue>& out, st
 			const StatShape& shape = tables.stats[stat];
 			const uint32_t   param = shape.paramBits != 0 ? static_cast<uint32_t>(bits.take(shape.paramBits)) : 0;
 			const int64_t    raw   = static_cast<int64_t>(bits.take(shape.saveBits));
-			out.push_back({ static_cast<uint16_t>(stat), static_cast<int32_t>(raw - shape.saveAdd), param });
+			out.push_back({ static_cast<uint16_t>(stat), static_cast<int32_t>(raw - shape.saveAdd), param, list, k > 0 });
 		}
 	}
 	problem = "a stat list has no end";
@@ -116,6 +116,7 @@ bool ReadItem(Bits& bits, const Tables& tables, Item& item, unsigned& inSockets,
 	const size_t start = bits.at;
 	item               = Item {};
 	item.offset        = static_cast<uint32_t>(start >> 3);
+	item.bitStart      = static_cast<uint32_t>(start);
 	item.flags         = static_cast<uint32_t>(bits.take(32));
 	bits.take(3);
 	item.location = static_cast<uint8_t>(bits.take(3));
@@ -175,14 +176,27 @@ bool ReadItem(Bits& bits, const Tables& tables, Item& item, unsigned& inSockets,
 				bits.take(12);
 			}
 		} else if (q == 4) {
-			bits.take(22);
+			for (uint8_t k = 0; k < 2; ++k) {
+				AffixSlot slot;
+				slot.suffix = k;
+				slot.slot   = k;
+				slot.bit    = static_cast<uint32_t>(bits.at);
+				slot.id     = static_cast<uint16_t>(bits.take(11));
+				item.affixes.push_back(slot);
+			}
 		} else if (q == 5 || q == 7) {
 			bits.take(12);
 		} else if (q == 6 || q == 8) {
 			bits.take(16);
-			for (int i = 0; i < 6; ++i) {
+			for (uint8_t i = 0; i < 6; ++i) {
 				if (bits.take(1) != 0) {
-					bits.take(11);
+					AffixSlot slot;
+					slot.suffix  = i & 1;
+					slot.slot    = i;
+					slot.flagged = true;
+					slot.bit     = static_cast<uint32_t>(bits.at);
+					slot.id      = static_cast<uint16_t>(bits.take(11));
+					item.affixes.push_back(slot);
 				}
 			}
 		} else {
@@ -227,9 +241,11 @@ bool ReadItem(Bits& bits, const Tables& tables, Item& item, unsigned& inSockets,
 			lists += (sets >> i & 1) != 0 ? 1 : 0;
 		}
 		for (int i = 0; i < lists; ++i) {
-			if (!ReadStats(bits, tables, item.stats, why)) {
+			const size_t from = bits.at;
+			if (!ReadStats(bits, tables, item.stats, why, static_cast<uint8_t>(i))) {
 				return fail(why);
 			}
+			item.lists.emplace_back(static_cast<uint32_t>(from), static_cast<uint32_t>(bits.at));
 		}
 		if (bits.take(1) != 0) {
 			item.quantity = static_cast<uint16_t>(bits.take(8));
@@ -241,6 +257,7 @@ bool ReadItem(Bits& bits, const Tables& tables, Item& item, unsigned& inSockets,
 	if (bits.bad) {
 		return fail("the file ends inside it");
 	}
+	item.bitEnd = static_cast<uint32_t>(bits.at);
 	bits.toByte();
 	return true;
 }
@@ -343,6 +360,48 @@ long Number(std::string_view text) {
 	return text.empty() ? 0 : strtol(std::string(text).c_str(), nullptr, 10);
 }
 
+// The character's attributes: "gf", then 9-bit stat ids each with its CSvBits value bits, 0x1ff,
+// up to the next whole byte, which must be the skills' "if" at `skills`.
+void ReadAttributes(const uint8_t* data, size_t size, const Tables& tables, FileResult& result) {
+	result.attributesProblem = "no \"gf\" whose attributes end where the skills start";
+	for (size_t p = 0x2a0; p + 2 < size; ++p) {
+		if (!Is(data, size, p, "gf")) {
+			continue;
+		}
+		Bits                   bits { data, size, (p + 2) * 8 };
+		std::vector<StatValue> found;
+		bool                   good = false;
+		for (int guard = 0; guard < 64 && !bits.bad; ++guard) {
+			const uint16_t id = static_cast<uint16_t>(bits.take(9));
+			if (bits.bad) {
+				break;
+			}
+			if (id == 0x1ff) {
+				bits.toByte();
+				good = bits.byte() == size;
+				break;
+			}
+			if (id >= tables.stats.size() || tables.stats[id].csvBits == 0 || tables.stats[id].csvBits > 32) {
+				break;
+			}
+			found.push_back({ id, static_cast<int32_t>(bits.take(tables.stats[id].csvBits)), 0, 0, false });
+		}
+		if (good) {
+			result.attributesRead = true;
+			result.attributesProblem.clear();
+			result.attributes = std::move(found);
+			return;
+		}
+	}
+	bool known = false;
+	for (const StatShape& shape : tables.stats) {
+		known = known || shape.csvBits != 0;
+	}
+	if (!known) {
+		result.attributesProblem = "the stat table has no CSvBits";
+	}
+}
+
 } // namespace
 
 void ShapesFromRows(Tables& tables, const uint8_t* rows, size_t count) {
@@ -356,6 +415,22 @@ void ShapesFromRows(Tables& tables, const uint8_t* rows, size_t count) {
 		tables.stats[i].saveAdd   = add;
 		tables.stats[i].paramBits = param >= 0 && param <= 255 ? static_cast<uint8_t>(param) : 255; // 255: refused when met
 	}
+	for (size_t i = 0; i < count; ++i) {
+		tables.stats[i].csvBits = rows[i * kStatRow + kRowCsvBits];
+	}
+}
+
+bool UsualCsvBits(const Tables& tables) {
+	static const uint8_t kUsual[16] = { 10, 10, 10, 10, 10, 8, 21, 21, 21, 21, 21, 21, 7, 32, 25, 25 };
+	if (tables.stats.size() < 16) {
+		return false;
+	}
+	for (size_t i = 0; i < 16; ++i) {
+		if (tables.stats[i].csvBits != kUsual[i]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void ShapesFromText(Tables& tables, std::string_view text) {
@@ -365,6 +440,7 @@ void ShapesFromText(Tables& tables, std::string_view text) {
 		shape.saveBits  = static_cast<uint8_t>(Number(cell("Save Bits")));
 		shape.saveAdd   = static_cast<int32_t>(Number(cell("Save Add")));
 		shape.paramBits = static_cast<uint8_t>(Number(cell("Save Param Bits")));
+		shape.csvBits   = static_cast<uint8_t>(Number(cell("CSvBits")));
 		tables.stats.push_back(shape);
 	});
 }
@@ -407,6 +483,7 @@ FileResult ReadCharacter(const uint8_t* data, size_t size, const Tables& tables)
 		result.problem = "the item list was not found";
 		return result;
 	}
+	ReadAttributes(data, at - 32, tables, result);
 	if (!ReadMarked(data, size, at, tables, "items", result.items, result.problem)) {
 		return result;
 	}
@@ -451,6 +528,10 @@ FileResult ReadCharacter(const uint8_t* data, size_t size, const Tables& tables)
 	// save version 105 ends with two bytes, "lf" and a count that was 0 in every file seen
 	if (at + 6 == size && Is(data, size, at + 2, "lf") && Word(data, at + 4) == 0) {
 		result.ok = true;
+		return result;
+	}
+	if (at + 6 == size && Is(data, size, at + 2, "lf")) {
+		result.problem = "its closing \"lf\" section has the count " + std::to_string(Word(data, at + 4)) + "; only 0 is known (what follows it is not known, and could hold items)";
 		return result;
 	}
 	result.problem = "after the golem section comes something the reader does not know (byte " + std::to_string(at) + " of " + std::to_string(size) + ")";

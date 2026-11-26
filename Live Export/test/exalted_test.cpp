@@ -98,9 +98,47 @@ int main(int argc, char** argv) {
 	LeaveOutExaltedRows(edits, left);
 	Check(edits.stats.size() == 1 && edits.stats[0].id == 478 && edits.props.empty() && left.problems.size() == 2,
 		"edits to xlt_roll_5 (495) and xlt-r1 are left out and reported; a made stat in an xlt_unused_ row stays");
+	{ // Exalted Items 1.3.0's stat-ids.txt: its own numbers by the map, made stats in every form carried
+		ExaltedIds  ids;
+		std::string why;
+		std::string map = "# Exalted Items: stat numbers\r\nlayout=packed\r\nmarker=375\r\n";
+		for (int k = 0; k < 13; ++k) {
+			map += "roll." + std::to_string(k) + "=" + std::to_string(376 + k) + "\r\n";
+		}
+		map += "made.stat477=389\r\nmade.stat478=390\r\nfree=391\r\nfree=392\r\n";
+		const bool read = ReadExaltedIds(map, ids, why) && !ids.legacy && ids.own.size() == 14 && ids.free.size() == 2 && ids.made.at("stat478") == 390;
+		ExaltedIds  bad;
+		const bool  refused = !ReadExaltedIds("layout=packed\r\nmarker=375\r\nrol.1=3\r\n", bad, why) && why.find("line 3") == 0 && !ReadExaltedIds("marker=375\r\n", bad, why);
+		Edits mine;
+		const std::string cells = row.substr(3);
+		ReadStatEdits("375" + cells + "\t-\txlt_restored\r\n"                // Exalted's marker
+		              "380" + cells + "\t-\t-\r\n"                           // a roll's number, no name
+		              "389" + cells + "\tstat477\tstat477\r\n"               // made, migrated: was is its name
+		              "390" + cells + "\t-\tstat478\r\n"                     // made by the map alone (no made name)
+		              "391" + cells + "\tstat391\tlive_free_391\r\n"         // made this session in a free row
+		              "7" + cells + "\t-\tmaxhp\r\n"                         // a game stat changed
+		              "487" + cells + "\tbig\txlt_unused_487\r\n",           // made in an old filler: kept with the map
+			mine);
+		Report report;
+		LeaveOutExaltedRows(mine, report, &ids);
+		std::string kept;
+		for (const StatEdit& s : mine.stats) {
+			kept += std::to_string(s.id) + (s.made ? "m " : " ");
+		}
+		Check(read && refused && kept == "389m 390m 391m 7 487m " && report.problems.size() == 2,
+			"with stat-ids.txt: Exalted Items' marker and rolls are left out by number; made stats are carried (made name, map, live_free_, xlt_unused_), a game stat stays one (" + kept + why + ")");
+		Edits old;
+		ReadStatEdits("487" + cells + "\tbig\txlt_unused_487\r\n", old);
+		Report oldReport;
+		LeaveOutExaltedRows(old, oldReport);
+		Check(old.stats.empty() && oldReport.problems.size() == 1, "without stat-ids.txt: made stats past 486 are left out as before");
+	}
 
 	// the D2RMM mod (made against Exalted Items' list) and the plain .mpq's cubemain (on the game's)
+	edits.liveProps    = LiveProps::ok; // listMade: the made stat right after the game's 368 stats
+	edits.madeStatRows = { { "mine", 368 } };
 	Report d2rmm;
+	TakeMadeRows(edits, d2rmm);
 	Spill(work + "mod.ts", D2rmmTs(edits, exalted, Tsv {}, [](const std::string&) { return false; }, d2rmm));
 	bool said = false;
 	for (const std::string& line : d2rmm.done) {

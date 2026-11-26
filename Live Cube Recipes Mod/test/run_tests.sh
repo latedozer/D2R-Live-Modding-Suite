@@ -21,12 +21,21 @@ echo "== addresses"
 python3 test/check_prints.py plugin.cpp "${IMAGE:-../bin/D2RLoader_6ab3782c_dump.exe}" || status=1
 echo "== plugin under Wine"
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -shared -static -static-libgcc -static-libstdc++ -o build/D2RCore.dll test/fake_core.cpp
+x86_64-w64-mingw32-g++ -std=c++20 -O2 -shared -static -static-libgcc -static-libstdc++ -o build/d2rl-live-properties.dll test/fake_live_props.cpp
+x86_64-w64-mingw32-g++ -std=c++20 -O2 -shared -static -static-libgcc -static-libstdc++ -o build/d2rl-live-tables.dll test/fake_live_tables.cpp
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -Wno-missing-field-initializers -static -static-libgcc -static-libstdc++ -I "$SDK" -o build/fake_host.exe test/fake_host.cpp
 WORK="$(mktemp -d)"
 ( cd "../Mod Book" && ./build.sh > /dev/null )
 ( cd build && WINEDEBUG=-all timeout 300 wine fake_host.exe "$(winepath -w "$PWD/d2rl-live-cube-recipes.dll")" "$(winepath -w "$WORK")" "$(winepath -w "$EXCEL")" "$(winepath -w "$PWD/../../Mod Book/build/d2rl-mod-book.dll")" 2>/dev/null ) > build/fake_host.out || status=1
 grep -E '^(ok|FAIL|ALL|FAILURES)' build/fake_host.out || status=1
 grep -q '^ALL PASSED' build/fake_host.out || status=1
+logged="$(grep -a -o 'd2rl-live-cube-recipes.dll [0-9.]* sha256 [0-9a-f]\{64\}' build/fake_host.out | head -1 | awk '{print $4}')"
+if [ -n "$logged" ] && [ "$logged" = "$(sha256sum build/d2rl-live-cube-recipes.dll | cut -c1-64)" ]; then
+	echo "ok  : the plugin logs its name, version and the sha256 of its own file at start ($logged)"
+else
+	echo "FAIL: the sha256 the plugin logs at start ('$logged') is not the DLL's"
+	status=1
+fi
 python3 - "$WORK/RecipeBookhd.json" <<'PY' || status=1
 import json, sys
 try:

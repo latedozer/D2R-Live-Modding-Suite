@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
+#include <D2RLPlugin/resource.h>
+#include <D2RLPlugin/version.h>
+
+D2RL_PLUGIN_MANIFEST_RESOURCE_ID RCDATA { D2RL_PLUGIN_RESOURCE_DWORD(D2RL_PLUGIN_ABI_VERSION) }
+D2RL_PLUGIN_CONFIG_RESOURCE_ID RCDATA "live-strings.toml"

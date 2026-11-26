@@ -75,6 +75,13 @@ void Put(uint8_t* row, const Field& field, long value) {
 
 namespace {
 
+const std::string* Data(const std::vector<std::string>* list) {
+	return list != nullptr ? list->data() : nullptr;
+}
+size_t Size(const std::vector<std::string>* list) {
+	return list != nullptr ? list->size() : 0;
+}
+
 std::string Word(const std::string* list, size_t count, long value, long none) {
 	if (value == none) {
 		return {};
@@ -128,10 +135,10 @@ Cells Read(const uint8_t* row, const Names& names) {
 			c.assign(reinterpret_cast<const char*>(row), strnlen(reinterpret_cast<const char*>(row), kNameRoom - 1));
 			break;
 		case kProp:
-			c = Word(names.props, names.propCount, v, names.noProp);
+			c = Word(Data(names.props), Size(names.props), v, names.noProp);
 			break;
 		case kType:
-			c = Word(names.types, names.typeCount, v, names.noType);
+			c = Word(Data(names.types), Size(names.types), v, names.noType);
 			break;
 		default:
 			c = v != 0 ? std::to_string(v) : "";
@@ -149,13 +156,13 @@ bool Build(const Cells& cells, const Names& names, uint8_t* next, std::string& p
 		case kName:
 			continue;
 		case kProp:
-			if (!Lookup(text, names.props, names.propCount, names.noProp, value)) {
+			if (!Lookup(text, Data(names.props), Size(names.props), names.noProp, value)) {
 				problem = std::string(f.name) + ": there is no property '" + text + "' (see the Properties tab)";
 				return false;
 			}
 			break;
 		case kType:
-			if (!Lookup(text, names.types, names.typeCount, names.noType, value)) {
+			if (!Lookup(text, Data(names.types), Size(names.types), names.noType, value)) {
 				problem = std::string(f.name) + ": there is no item type '" + text + "' (codes as in itemtypes.txt: scha, char, ring...)";
 				return false;
 			}
@@ -170,6 +177,29 @@ bool Build(const Cells& cells, const Names& names, uint8_t* next, std::string& p
 	}
 	// no min <= max check: the game's own rows have ranges like min -25, max -40
 	return true;
+}
+
+size_t ClassicEnd(const uint8_t* rows, size_t count) {
+	for (size_t i = 0; i < count; ++i) {
+		uint16_t version = 0;
+		memcpy(&version, rows + i * kRow + 0x22, 2);
+		if (version >= 1) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+void Off(uint8_t* row) {
+	Put(row, kFields[kSpawnCell], 0);
+	Put(row, kFields[kFrequencyCell], 0);
+}
+bool IsOff(const uint8_t* row) {
+	return Get(row, kFields[kSpawnCell]) == 0 && Get(row, kFields[kFrequencyCell]) == 0;
+}
+void On(uint8_t* row, const uint8_t* from) {
+	Put(row, kFields[kSpawnCell], Get(from, kFields[kSpawnCell]));
+	Put(row, kFields[kFrequencyCell], Get(from, kFields[kFrequencyCell]));
 }
 
 bool IsBlank(const uint8_t* row, const Names& names) {

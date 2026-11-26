@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Latedozer. Free software under the GNU GPL version 3; see LICENSE.
+# Live Strings: text keys made while the game runs (other plugins ask for them; console: type strings).
+# Every text made is kept in d2rloader\live-suite\live-strings\<mod>\strings.json and given to the
+# game again at every start. Close the game before editing this file; changes apply on the next start.
+
+# false = Live Strings does nothing: kept texts do not reach the game, so stat lines that name them
+# show no text.
+enabled = true

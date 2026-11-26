@@ -28,6 +28,7 @@
 #include <CascLib.h>
 
 #include <algorithm>
+#include <tuple>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
@@ -38,7 +39,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.7.0";
+constexpr const char* kVersion = "0.8.0";
 
 const D2RL::PluginContext* g_ctx = nullptr;
 
@@ -200,6 +201,7 @@ std::string ButtonSprite(std::string_view source, int width, int height) {
 	return out;
 }
 
+constexpr int    kRowButtons = 4, kRowWidth = 232, kRowStep = 240; // the tab rows' and the action row's slots
 constexpr int kButtonWidths[] = { 116, 188, 200, 216, 220, 232, 250, 300, 330, 470, 480, 482, 500, 512, 700, 742 };
 bool          g_buttonArt     = false;
 bool          g_barArt        = false;
@@ -323,6 +325,11 @@ struct Slot {
 	D2RL::Resources::RegistrationHandle layout = D2RL::Resources::InvalidHandle;
 	bool                                loaded   = false; // D2R holds a panel made from its layout
 	uint64_t                            closedAt = 0;     // when it was closed (0: open, or never used)
+	// for opening it again instead of a new layout (SideShow): the page's shape, the texts its
+	// layout has, the texts and mark it showed when it was closed (changed in place since)
+	std::string           shape;
+	std::vector<PageVar>  layoutVars, lastVars;
+	int                   lastMark = -1, marks = 0;
 };
 
 struct TabEntry {
@@ -368,6 +375,7 @@ struct Side {
 	int                    mark = -1, marks = 0;
 	uint64_t               marksPending = 0; // since when the spare marks wait to be hidden
 	int              down   = 0;   // how far the page shown moved its tab's widgets down
+	unsigned         built = 0, reused = 0, inPlace = 0; // pages shown as a new layout, as a closed panel opened again, in the panel on screen
 	// the list's scroll bar on the page shown (UI thread), for dragging it
 	bool     hasBar = false;
 	int      barY   = 0; // the bar's top on the page
@@ -454,6 +462,7 @@ struct modbook::Page {
 	std::string      shape = {};
 	std::vector<Var> vars  = {};
 	int              mark = -1, marks = 0; // the scroll bar's mark: which of how many is seen
+	int              actionRow = 0, actionSlot = 0; // the action row: the row being filled, its next free slot
 	int         y(int at) const { return at >= 250 ? at + down : at; }
 	std::string clickName(const std::string& click) const { return std::string(kClick) + side->id + click; }
 };
@@ -480,7 +489,11 @@ void PageStart(Page& p, const std::string& title) {
 	      + "PanelRect\", \"priority\": 8500 },\n\t\"children\": [\n\t\t{ \"type\": \"ImageWidget\", \"name\": \"Background\", \"fields\": { \"filename\": \"PANEL\\\\PANEL_BG\" } },\n"
 	        "\t\t{ \"type\": \"ImageWidget\", \"name\": \"Hinge\", \"fields\": { \"rect\": \"$"
 	      + side + "HingeRect\", \"filename\": \"$" + side + "HingeSprite\" } },\n"
-	      + "\t\t{ \"type\": \"ClickCatcherWidget\", \"name\": \"ClickCatcher\", \"fields\": { \"rect\": \"$PanelClickCatcherRect\" } },\n";
+	      + "\t\t{ \"type\": \"ClickCatcherWidget\", \"name\": \"ClickCatcher\", \"fields\": { \"rect\": \"$PanelClickCatcherRect\" } },\n"
+	      // RectProbe over RectProbeRef: two small marks at the bottom left, one on the other; the probe moves RectProbe
+	      // 40 to the right in place, once a session (Probe) - two marks side by side = a widget can be moved in place
+	      + "\t\t{ \"type\": \"ImageWidget\", \"name\": \"RectProbeRef\", \"fields\": { \"rect\": { \"x\": 24, \"y\": 1250 }, \"filename\": \"d2rloader\\\\mod-book\\\\scrollmark\" } },\n"
+	      + "\t\t{ \"type\": \"ImageWidget\", \"name\": \"RectProbe\", \"fields\": { \"rect\": { \"x\": 24, \"y\": 1250 }, \"filename\": \"d2rloader\\\\mod-book\\\\scrollmark\" } },\n";
 	p.shape = p.out;
 	p.title = title;
 }
@@ -584,6 +597,39 @@ void __cdecl ApiImage(Page* p, const char* name, int x, int y, const char* filen
 		snprintf(head, sizeof(head), "\t\t{ \"type\": \"ImageWidget\", \"name\": \"%s\", \"fields\": { \"rect\": { \"x\": %d, \"y\": %d }, \"filename\": \"", Text(name), x, p->y(y));
 		Put(*p, head + JsonText(Text(filename)) + "\" } },\n");
 	}
+}
+// The action row (mod_book_api.h): slots 232 wide, 4 to a row, rows 56 apart from y 262.
+int __cdecl ApiAction(Page* p, const char* click, const char* text, const char* color, int slots) noexcept {
+	if (p == nullptr) {
+		return modbook::kActionY;
+	}
+	if (click == nullptr) { // the row ends here
+		if (p->actionSlot > 0) {
+			++p->actionRow, p->actionSlot = 0;
+		}
+		return modbook::kActionY + p->actionRow * modbook::kActionRowStep;
+	}
+	const int n = slots < 1 ? 1 : slots > kRowButtons ? kRowButtons : slots;
+	if (p->actionSlot + n > kRowButtons) {
+		++p->actionRow, p->actionSlot = 0;
+	}
+	const int room  = n * modbook::kActionSlot + (n - 1) * modbook::kActionGap;
+	int       width = kButtonWidths[0];
+	for (const int w : kButtonWidths) {
+		width = w <= room && w <= 990 ? w : width;
+	}
+	RawButton(*p, Text(click), 82 + p->actionSlot * kRowStep, p->y(modbook::kActionY + p->actionRow * modbook::kActionRowStep), width, Text(text), color != nullptr ? color : "$FontColorGoldYellow");
+	p->actionSlot += n;
+	return modbook::kActionY + (p->actionRow + 1) * modbook::kActionRowStep;
+}
+// The search box: the same place and width on every tab.
+void __cdecl ApiSearch(Page* p, const char* typed, const char* hint) noexcept {
+	if (p == nullptr) {
+		return;
+	}
+	const std::string words = Text(typed);
+	ApiImage(p, "SearchSlot", 210, 138, "PANEL\\Modals\\InputSlot");
+	ApiLabel(p, "Search", 250, 166, 660, 56, words.empty() ? "$FontColorGoldYellow" : "$FontColorWhite", "left", 0, words.empty() ? Text(hint) : (words + "_").c_str());
 }
 constexpr int kBarPiece = 40, kBarSpotX = 1062, kBarSpotWidth = 38, kMarksMost = 49;
 
@@ -742,16 +788,19 @@ Page SidePage(Side& s) {
 			members.push_back(i);
 		}
 	}
-	s.down = groups.empty() ? (tabs.size() > 1 ? modbook::kStripHeight : 0) : modbook::kStripHeight * (members.size() > 1 ? 2 : 1);
+	// The tab rows: buttons 232 wide, 4 to a row from x 82 (82 / 322 / 562 / 802), a fifth starts a
+	// row kStripHeight lower; the groups' rows first. The button shown is white, the others gold.
+	const auto rowsOf = [](size_t n) { return static_cast<int>((n + kRowButtons - 1) / kRowButtons); };
+	const int  groupRows = groups.empty() ? 0 : rowsOf(groups.size());
+	const int  tabRows   = groups.empty() ? (tabs.size() > 1 ? rowsOf(tabs.size()) : 0) : (members.size() > 1 ? rowsOf(members.size()) : 0);
+	s.down = (groupRows + tabRows) * modbook::kStripHeight;
 	Page      page { {}, &s, s.down };
 	std::vector<Hit> hits;
 	TabEntry* tab = !tabs.empty() ? TabOf(tabs[shown] + 1) : nullptr;
 	PageStart(page, tab != nullptr ? tab->title : std::string("Mod Book"));
-	const auto row = [&](size_t n, int y, const auto& button) { // 1 or 2 buttons 480 wide, 3 at 300, 4 at 232, 5 at 188
-		const int width = n <= 2 ? 480 : n == 3 ? 300 : n == 4 ? 232 : 188;
-		const int step  = n > 1 ? (990 - width) / static_cast<int>(n - 1) : 0;
-		for (size_t i = 0; i < n && i < 5; ++i) {
-			button(i, 82 + static_cast<int>(i) * step, y, width);
+	const auto row = [&](size_t n, int top, const auto& button) {
+		for (size_t i = 0; i < n; ++i) {
+			button(i, 82 + static_cast<int>(i % kRowButtons) * kRowStep, top + static_cast<int>(i / kRowButtons) * modbook::kStripHeight, kRowWidth);
 		}
 	};
 	if (!groups.empty()) {
@@ -766,23 +815,18 @@ Page SidePage(Side& s) {
 			hits.push_back({ true, count == 1 ? only : 0, groups[i], "Group" + std::to_string(i), static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), 44 });
 		});
 		if (members.size() > 1) {
-			row(members.size(), 262 + modbook::kStripHeight, [&](size_t i, int x, int y, int width) {
+			row(members.size(), 262 + groupRows * modbook::kStripHeight, [&](size_t i, int x, int y, int width) {
 				const TabEntry* entry = TabOf(tabs[members[i]] + 1);
 				RawButton(page, "Tab" + std::to_string(members[i]), x, y, width, entry != nullptr ? entry->title : "?", members[i] == shown ? "$FontColorWhite" : "$FontColorGoldYellow");
 				hits.push_back({ false, tabs[members[i]] + 1, groups[static_cast<size_t>(groupOf[members[i]])], "Tab" + std::to_string(members[i]), static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), 44 });
 			});
 		}
 	} else if (tabs.size() > 1) {
-		// the tab row: 2 tabs 480 wide, 3 at 300, 4 at 232, 5 at 188; the one shown is white
-		const size_t n     = tabs.size();
-		const int    width = n == 2 ? 480 : n == 3 ? 300 : n == 4 ? 232 : 188;
-		const int    step  = n > 1 ? (990 - width) / static_cast<int>(n - 1) : 0;
-		for (size_t i = 0; i < n; ++i) {
+		row(tabs.size(), 262, [&](size_t i, int x, int y, int width) {
 			const TabEntry* entry = TabOf(tabs[i] + 1);
-			RawButton(page, "Tab" + std::to_string(i), 82 + static_cast<int>(i) * step, 262, width, entry != nullptr ? entry->title : "?",
-				static_cast<int>(i) == s.current ? "$FontColorWhite" : "$FontColorGoldYellow");
-			hits.push_back({ false, tabs[i] + 1, std::string(), "Tab" + std::to_string(i), static_cast<float>(82 + static_cast<int>(i) * step), 262, static_cast<float>(width), 44 });
-		}
+			RawButton(page, "Tab" + std::to_string(i), x, y, width, entry != nullptr ? entry->title : "?", static_cast<int>(i) == s.current ? "$FontColorWhite" : "$FontColorGoldYellow");
+			hits.push_back({ false, tabs[i] + 1, std::string(), "Tab" + std::to_string(i), static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), 44 });
+		});
 	}
 	if (tab == nullptr) {
 		RawLabel(page, "Empty", 82, 400, 990, 200, "$FontColorGoldYellow", "center", true, "No plugin has put a page here.");
@@ -838,11 +882,16 @@ TabEntry* CurrentTab(Side& s) {
 	return TabOf(tabs[static_cast<size_t>(s.current)] + 1);
 }
 
+void LegendFollow(const Side& s);
+
 void Tell(Side& s, bool on) { // the current tab: on screen or not
 	if (s.told == on) {
 		return;
 	}
 	s.told = on;
+	if (on) {
+		LegendFollow(s); // the Legend on the other side follows the tab shown here
+	}
 	if (TabEntry* tab = CurrentTab(s); tab != nullptr && tab->tab.shown != nullptr) {
 		tab->tab.shown(tab->tab.user, on ? 1 : 0);
 	}
@@ -862,8 +911,11 @@ void AskJob();
 //   0x3440170  the panel manager (a pointer)
 //   0x89f760   panel   = FindPanel(manager, name)
 //   0x855c90   child   = FindChild(widget, name)
-//   0x86dd50   SetText(text block, { text, length })   - a TextBoxWidget's block is at +0x818,
-//              its vtable 0x1cf4610
+//   0x86dd50   SetText(text box, { text, length })     - assigns the string at +0x88, then lays
+//              the text out again (0x86e570). A layout's "TextBoxWidget" is made by its type's
+//              create routine 0x86d3b0: 0x230 bytes, constructor 0x2cde10, vtable 0x1cf4610 at +0.
+//              (0.5.0 - 0.7.0 looked at +0x818: that is the TextBoxWidget held INSIDE a bigger
+//              widget class, constructor 0x86e920, vtable 0x1ce4148 - not the labels made here.)
 //   0x80cf0    Assign(string, text, length)            - a FocusableWidget's hover text is the
 //              string at +0x88
 // Used only when the image stamp and the routines' first bytes are these; anything that does
@@ -872,7 +924,7 @@ void AskJob();
 
 constexpr uint32_t  kGameStamp  = 0x6ab3782c;
 constexpr uintptr_t kManagerAt  = 0x3440170, kFindPanelAt = 0x89f760, kFindChildAt = 0x855c90, kSetTextAt = 0x86dd50, kAssignAt = 0x80cf0, kTextBlockTable = 0x1cf4610;
-constexpr size_t    kTextBlock  = 0x818, kBlockString = 0x88, kHoverString = 0x88;
+constexpr size_t    kTextBlock  = 0, kBlockString = 0x88, kHoverString = 0x88;
 
 struct GameView {
 	const char* text;
@@ -995,10 +1047,36 @@ bool MarkShow(Side& s, int from, int to) {
 
 // Makes the panel on screen say what `page` says, when only texts and the mark differ. False:
 // it needs a new panel. UI thread.
-bool InPlace(Side& s, const Page& page) {
-	if (!g_inPlace || s.active < 0 || s.marksPending != 0 || page.shape != s.shape || page.vars.size() != s.vars.size() || page.marks != s.marks) {
+std::string g_reuseWhy; // why a panel opened again did not hold what was expected (UI thread)
+
+// assumed: a panel just opened again - every text is checked against these and written, and
+// what does not match only makes this panel unusable (the caller falls back), in place stays on.
+bool InPlace(Side& s, const Page& page, const std::vector<PageVar>* assumed = nullptr) {
+	const std::vector<PageVar>& before = assumed != nullptr ? *assumed : s.vars;
+	if (!g_inPlace || s.active < 0 || (assumed == nullptr && s.marksPending != 0) || page.shape != s.shape || page.vars.size() != before.size() || page.marks != s.marks) {
 		return false;
 	}
+	// what the panel's layout has: a text found as the layout has it was set back by the game
+	// (seen for hover texts in 0.8.0: 19:16:46), it is written again
+	const std::vector<PageVar>* layout = s.slots[s.active].layoutVars.size() == page.vars.size() ? &s.slots[s.active].layoutVars : nullptr;
+	const auto off = [&](const std::string& why) { // the game's widgets are not as known: in place goes for the session
+		if (assumed != nullptr) {
+			g_reuseWhy = why;
+		} else {
+			InPlaceOff(s, why);
+		}
+	};
+	const auto stale = [&](const std::string& why) { // this panel does not hold what was drawn: only it is given up
+		if (assumed != nullptr) {
+			g_reuseWhy = why;
+		} else {
+			LogF("%s: the panel on screen does not hold what was drawn (%s); the page gets a new panel, in place stays on", s.id, why.c_str());
+			s.slots[s.active].shape.clear(); // not opened again for its shape
+		}
+	};
+	const auto holds = [](const GameString* held, const std::string& text) {
+		return held->length == text.size() && memcmp(held->text, text.data(), text.size()) == 0;
+	};
 	struct Change {
 		void*       widget;
 		bool        tip;
@@ -1008,38 +1086,71 @@ bool InPlace(Side& s, const Page& page) {
 	void*               panel = nullptr;
 	for (size_t i = 0; i < page.vars.size(); ++i) {
 		const Page::Var& now = page.vars[i];
-		const Page::Var& old = s.vars[i];
-		if (now.text == old.text) {
-			continue;
+		const Page::Var& old = before[i];
+		if (now.text == old.text && assumed == nullptr && !now.tip) {
+			continue; // hover texts are looked at every time: the game may have set one back
 		}
 		if (panel == nullptr && (panel = GamePanel(s)) == nullptr) {
 			return false; // the panel is not there (any more): a new one, in place stays on
 		}
 		void* widget = reinterpret_cast<FindFn>(g_game + kFindChildAt)(panel, now.name.c_str());
 		if (widget == nullptr) {
-			InPlaceOff(s, "the panel has no '" + now.name + "'");
+			stale("the panel has no '" + now.name + "'");
 			return false;
 		}
-		const std::string was = GameText(old.text);
+		const std::string was     = GameText(old.text);
+		const std::string layoutWas = layout != nullptr ? GameText((*layout)[i].text) : was;
 		if (now.tip) {
 			const auto* held = reinterpret_cast<const GameString*>(static_cast<char*>(widget) + kHoverString);
-			if (!Readable(held, sizeof(GameString)) || held->length > 0x10000 || !Readable(held->text, held->length + 1) || held->length != was.size() || memcmp(held->text, was.data(), was.size()) != 0) {
-				const bool        can   = Readable(held, sizeof(GameString)) && held->length <= 0x10000 && Readable(held->text, held->length + 1);
-				const std::string found = can ? std::string(held->text, held->length < 60 ? held->length : 60) : std::string("(unreadable)");
-				InPlaceOff(s, "the hover text of '" + now.name + "' is not where it is known to be (expected '" + was.substr(0, 60) + "', found '" + found + "')");
+			const bool can = Readable(held, sizeof(GameString)) && held->length <= 0x10000 && Readable(held->text, held->length + 1);
+			if (!can) {
+				off("the hover text of '" + now.name + "' is not where it is known to be (unreadable)");
 				return false;
+			}
+			if (!holds(held, was)) {
+				const std::string found = std::string(held->text, held->length < 60 ? held->length : 60);
+				if (!holds(held, layoutWas)) {
+					stale("the hover text of '" + now.name + "' is '" + found + "', drawn was '" + was.substr(0, 60) + "', its layout has '" + layoutWas.substr(0, 60) + "'");
+					return false;
+				}
+				static bool told = false;
+				if (!told) {
+					told = true;
+					LogF("%s: the hover text of '%s' was set back by the game to its layout's text ('%s', drawn was '%s'); it is written again (said once)", s.id, now.name.c_str(), found.c_str(), was.substr(0, 60).c_str());
+				}
+			} else if (now.text == old.text && assumed == nullptr) {
+				continue; // as drawn: nothing to write
 			}
 		} else {
 			const auto* block = static_cast<char*>(widget) + kTextBlock;
-			if (!Readable(block, kBlockString + sizeof(GameString)) || *reinterpret_cast<const uintptr_t*>(block) != g_game + kTextBlockTable) {
-				InPlaceOff(s, "'" + now.name + "' is not a text box as known");
+			const auto* held  = reinterpret_cast<const GameString*>(block + kBlockString);
+			const bool  table = Readable(block, kBlockString + sizeof(GameString)) && *reinterpret_cast<const uintptr_t*>(block) == g_game + kTextBlockTable;
+			const bool readable = table && held->length <= 0x10000 && Readable(held->text, held->length + 1);
+			if (readable && !holds(held, was) && holds(held, layoutWas)) {
+				static bool told = false;
+				if (!told) {
+					told = true;
+					LogF("%s: the text of '%s' was set back by the game to its layout's text; it is written again (said once)", s.id, now.name.c_str());
+				}
+			} else if (readable && !holds(held, was)) {
+				stale("'" + now.name + "' holds '" + std::string(held->text, held->length < 60 ? held->length : 60) + "', drawn was '" + was.substr(0, 60) + "'");
+				return false;
+			} else if (!readable) {
+				char found[160];
+				if (!Readable(block, kBlockString + sizeof(GameString))) {
+					snprintf(found, sizeof(found), "unreadable");
+				} else {
+					snprintf(found, sizeof(found), "table %llx (known %llx), text length %llu (expected %zu)", static_cast<unsigned long long>(*reinterpret_cast<const uintptr_t*>(block) - g_game),
+						static_cast<unsigned long long>(kTextBlockTable), static_cast<unsigned long long>(held->length), was.size());
+				}
+				off("'" + now.name + "' is not a text box as known (" + found + ")");
 				return false;
 			}
 		}
 		changes.push_back({ widget, now.tip, GameText(now.text) });
 	}
 	if (page.mark != s.mark && !MarkShow(s, s.mark, page.mark)) {
-		InPlaceOff(s, "the scroll bar's mark could not be moved");
+		off("the scroll bar's mark could not be moved");
 		return false;
 	}
 	for (const Change& change : changes) {
@@ -1050,12 +1161,146 @@ bool InPlace(Side& s, const Page& page) {
 			reinterpret_cast<SetTextFn>(g_game + kSetTextAt)(static_cast<char*>(change.widget) + kTextBlock, &view);
 		}
 	}
+	if (assumed == nullptr) {
+		++s.inPlace;
+	}
 	static bool said = false;
-	if (!said) {
+	if (!said && assumed == nullptr) {
 		said = true;
 		LogF("%s: in place: the first page changed without a new panel (%zu texts)", s.id, changes.size());
 	}
 	s.vars = page.vars, s.mark = page.mark;
+	return true;
+}
+
+// The probe (once a session, read-only but for its own hidden widget RectProbe): can a widget's
+// place be changed in the panel on screen? Logs the rect at widget+0x70 (the 16 bytes the
+// loader's getWidgetRect copies) before and after moving it 5 to the right, and once more at the
+// next page of that panel: whether the game kept the change or made the rect again.
+int   g_probeState = 0; // 0 not yet, 1 moved (waiting for the read back), 2 done
+void* g_probeWidget = nullptr;
+int   g_probeSlot = -1;
+const Side* g_probeSide = nullptr;
+
+std::string RectText(const void* at) {
+	int32_t ints[4];
+	float   floats[4];
+	memcpy(ints, at, 16);
+	memcpy(floats, at, 16);
+	char text[200];
+	snprintf(text, sizeof(text), "as int32 %d %d %d %d, as float %g %g %g %g", ints[0], ints[1], ints[2], ints[3], floats[0], floats[1], floats[2], floats[3]);
+	return text;
+}
+
+void Probe(Side& s) {
+	if (g_probeState == 1 && g_probeSide == &s) {
+		if (s.active == g_probeSlot) {
+			void* panel  = GamePanel(s);
+			void* widget = panel != nullptr ? reinterpret_cast<FindFn>(g_game + kFindChildAt)(panel, "RectProbe") : nullptr;
+			if (widget == g_probeWidget && Readable(static_cast<char*>(widget) + 0x70, 16)) {
+				LogF("%s: probe: RectProbe's rect at the next page: %s", s.id, RectText(static_cast<char*>(widget) + 0x70).c_str());
+				g_probeState = 2;
+			}
+		}
+		return;
+	}
+	if (g_probeState != 0 || !g_inPlace || s.active < 0 || s.right) {
+		return;
+	}
+	void* panel  = GamePanel(s);
+	void* widget = panel != nullptr ? reinterpret_cast<FindFn>(g_game + kFindChildAt)(panel, "RectProbe") : nullptr;
+	if (widget == nullptr || !Readable(widget, 0x80)) {
+		return; // the panel is not there yet: the next page tries
+	}
+	g_probeState = 2;
+	const auto table = *reinterpret_cast<const uintptr_t*>(widget);
+	if (table < g_game || table >= g_game + g_gameSize || !Readable(reinterpret_cast<const void*>(table + 0x50), sizeof(void*))) {
+		LogF("%s: probe: RectProbe is not a widget as known; no probe", s.id);
+		return;
+	}
+	const auto seen = *reinterpret_cast<const uintptr_t*>(table + 0x50);
+	if (seen < g_game || seen >= g_game + g_gameSize) {
+		LogF("%s: probe: RectProbe has no known 'seen' routine; no probe", s.id);
+		return;
+	}
+	auto*         rect = static_cast<char*>(widget) + 0x70;
+	const std::string before = RectText(rect);
+	// the rect is 4 int32 (0.8.0's log: a 1 x 1 widget read "0 0 1 1" as int32; 0.8.0 wrongly wrote a float there)
+	int32_t ints[4];
+	memcpy(ints, rect, 16);
+	ints[0] += 40;
+	memcpy(rect, ints, 4);
+	LogF("%s: probe: RectProbe rect before: %s; after moving x by 40: %s. LOOK at the book's bottom left: two small gold marks side by side = a widget can be moved in place; one mark = it cannot", s.id, before.c_str(), RectText(rect).c_str());
+	g_probeWidget = widget, g_probeSlot = s.active, g_probeSide = &s, g_probeState = 1;
+}
+
+// Closes a slot's panel and keeps what it showed, so that it can be opened again (Reuse).
+void SlotClose(Side& s, int index) {
+	Slot& slot = s.slots[index];
+	static_cast<void>(g_panels->closePanel(g_ctx, slot.panel));
+	slot.closedAt = NowMs();
+	if (index == s.active) {
+		slot.lastVars = s.vars, slot.lastMark = s.mark;
+	}
+}
+
+// A page whose shape a closed, still loaded panel has: that panel is opened again (no new
+// layout) and its texts are set in place. Whether the game keeps a closed panel's widgets as
+// they were last changed or makes them again from the layout is not known, so both are tried:
+// every text is checked before any is written. What matches neither: this panel is not opened
+// again for this shape, and the page gets a new one as before.
+bool Reuse(Side& s, const Page& page, uint64_t now) {
+	if (!g_inPlace) {
+		return false;
+	}
+	int found = -1;
+	for (int i = 0; i < kSlots && found < 0; ++i) {
+		const Slot& slot = s.slots[i];
+		if (i != s.active && slot.loaded && slot.closedAt != 0 && slot.shape == page.shape && slot.marks == page.marks && slot.layoutVars.size() == page.vars.size()) {
+			found = i;
+		}
+	}
+	if (found < 0) {
+		return false;
+	}
+	Slot& slot = s.slots[found];
+	if (g_panels->openPanel(g_ctx, slot.panel) != D2RL::Panels::Result::Success) {
+		slot.shape.clear();
+		return false;
+	}
+	const int previous = s.active;
+	if (previous >= 0) { // what the panel on screen shows, for opening it again later
+		s.slots[previous].lastVars = s.vars, s.slots[previous].lastMark = s.mark;
+	}
+	const auto  keep     = std::make_tuple(s.shape, s.vars, s.mark, s.marks, s.marksPending);
+	s.active = found, s.shape = page.shape, s.marks = page.marks, s.marksPending = 0;
+	bool done = false;
+	for (const std::vector<PageVar>* assumed : { &slot.lastVars, &slot.layoutVars }) {
+		s.mark = -3; // every mark but the page's is hidden again
+		if (!done && assumed->size() == page.vars.size() && InPlace(s, page, assumed)) {
+			done = true;
+		}
+	}
+	if (!done) {
+		LogF("%s: a panel opened again does not hold what was expected (%s); the page gets a new one", s.id, g_reuseWhy.c_str());
+		static_cast<void>(g_panels->closePanel(g_ctx, slot.panel));
+		slot.closedAt = now, slot.shape.clear(); // this panel gets a new layout when its turn comes
+		s.active = previous;
+		std::tie(s.shape, s.vars, s.mark, s.marks, s.marksPending) = keep;
+		return false;
+	}
+	s.vars = page.vars, s.mark = page.mark;
+	slot.closedAt = 0;
+	s.cursor      = found;
+	s.shownAt     = now;
+	++s.reused;
+	if (s.reused == 1) {
+		LogF("%s: a closed panel was opened again for a page of its shape (no new panel)", s.id);
+	}
+	if (previous >= 0) {
+		SlotClose(s, previous);
+	}
+	s.open.store(true);
 	return true;
 }
 
@@ -1066,6 +1311,7 @@ Shown SideShow(Side& s) {
 	Tell(s, true); // before it draws: the tab learns it is the one shown
 	Page page = SidePage(s);
 	if (InPlace(s, page)) {
+		Probe(s);
 		return Shown::Yes; // the panel on screen now says what this page says
 	}
 	if (page.marks > 0 && !g_inPlace) {
@@ -1073,6 +1319,9 @@ Shown SideShow(Side& s) {
 	}
 	if (s.active >= 0 && now - s.shownAt < kPace) {
 		return Shown::Later; // drawn a moment ago: the newest state is drawn on the next UI update after the pace
+	}
+	if (Reuse(s, page, now)) {
+		return Shown::Yes; // a closed panel of the same shape, opened again and changed in place
 	}
 	for (int offset = 1; offset <= kSlots && target < 0; ++offset) {
 		const int   index = (s.cursor + offset) % kSlots;
@@ -1111,10 +1360,15 @@ Shown SideShow(Side& s) {
 		return Shown::No;
 	}
 	const int previous = s.active;
+	if (previous >= 0) { // what the panel on screen shows, for opening it again later
+		s.slots[previous].lastVars = s.vars, s.slots[previous].lastMark = s.mark;
+	}
 	s.active           = target;
 	s.cursor           = target;
 	next.loaded        = true;
 	next.closedAt      = 0;
+	next.shape = page.shape, next.layoutVars = page.vars, next.marks = page.marks;
+	++s.built;
 	s.shownAt          = now;
 	s.shape = page.shape, s.vars = page.vars, s.mark = page.mark, s.marks = page.marks;
 	s.marksPending = 0;
@@ -1123,18 +1377,18 @@ Shown SideShow(Side& s) {
 		AskJob();
 	}
 	if (previous >= 0) {
-		static_cast<void>(g_panels->closePanel(g_ctx, s.slots[previous].panel));
-		s.slots[previous].closedAt = NowMs();
+		SlotClose(s, previous);
 	}
 	s.open.store(true);
+	Probe(s);
 	return Shown::Yes;
 }
 
 void SideClose(Side& s) {
 	if (s.active >= 0) {
-		static_cast<void>(g_panels->closePanel(g_ctx, s.slots[s.active].panel));
-		s.slots[s.active].closedAt = NowMs();
-		s.active                   = -1;
+		SlotClose(s, s.active);
+		s.active = -1;
+		LogF("%s: closed; pages shown since the start: %u as a new panel, %u by opening a closed one again, %u changed in the panel on screen", s.id, s.built, s.reused, s.inPlace);
 	}
 	s.open.store(false);
 	Tell(s, false);
@@ -1412,7 +1666,9 @@ void MoveTab(const TabMove& m) {
 		}
 		entry->group = m.group == "Other" ? std::string() : m.group;
 	} else {
-		entry->group = anyGroup ? entry->home : std::string(); // let go on the panel: its own group where there are groups, none where there are none
+		// let go on the panel: its own group where there are groups, none where there are none -
+		// but Mod Book's own Legend always keeps General, so that it stays in General once other tabs with groups come
+		entry->group = anyGroup || entry->id == "legend" ? entry->home : std::string();
 	}
 	to.tabs.insert(to.tabs.begin() + static_cast<long>(at), m.handle - 1);
 	entry->tab.side = m.to;
@@ -1965,7 +2221,7 @@ int __cdecl ApiAddTab(const modbook::Tab* tab) noexcept {
 	}
 	auto* entry = new TabEntry; // never freed: the UI thread may be drawing it
 	memcpy(&entry->tab, tab, tab->size < sizeof(modbook::Tab) ? tab->size : sizeof(modbook::Tab)); // a tab from before groups has none
-	entry->group     = tab->size >= sizeof(modbook::Tab) && tab->group != nullptr ? tab->group : "";
+	entry->group     = tab->size >= offsetof(modbook::Tab, group) + sizeof(tab->group) && tab->group != nullptr ? tab->group : ""; // a tab from before groups has none
 	entry->home      = entry->group;
 	entry->tab.group = nullptr;
 	entry->tab.size  = sizeof(modbook::Tab);
@@ -2006,8 +2262,8 @@ int __cdecl ApiAddTab(const modbook::Tab* tab) noexcept {
 				++side.current;
 			}
 			side.tabs.insert(side.tabs.begin() + static_cast<long>(before), static_cast<int>(g_tabs.size()) - 1);
-		} else if (!side.tabs.empty() && g_tabs[static_cast<size_t>(side.tabs.back())]->id == "terms" && entry->id != "terms" && SavedOf("terms") == nullptr) {
-			// the Mod Book's own Terms tab stays the last one of its side (unless the player moved it)
+		} else if (!side.tabs.empty() && g_tabs[static_cast<size_t>(side.tabs.back())]->id == "legend" && entry->id != "legend" && SavedOf("legend") == nullptr) {
+			// the Mod Book's own Legend tab stays the last one of its side (unless the player moved it)
 			if (side.current == static_cast<int>(side.tabs.size()) - 1) {
 				++side.current;
 			}
@@ -2102,9 +2358,9 @@ void __cdecl ApiClose(int side) noexcept {
 	}
 }
 
-// ---------------------------------------------------------------- the Terms tab
+// ---------------------------------------------------------------- the Terms
 
-// The words of properties and stats. The Mod Book's own tab, in the right side's General group.
+// The words of properties and stats: the Legend's own section "Terms".
 struct Term {
 	const char* word;
 	const char* text;
@@ -2135,100 +2391,430 @@ constexpr Term kTerms[] = {
 	{ "the game's own row", "A table row as the game read it from the mod's files, before any change here. Every card can go back to it." },
 };
 
-struct TermsView {
-	int                 handle = 0;
-	std::string         words;
-	std::vector<size_t> found;
-	size_t              top = 0;
-};
-TermsView        g_terms; // UI thread only
-constexpr size_t kTermRows = 5;
+// ---------------------------------------------------------------- the Legend
+//
+// One tab ("Legend", right side, General group) built from the sections the plugins add
+// (mod_book_api.h: LegendSection). Mod Book's own Terms above are one of them.
 
-void TermsFilter() {
-	std::string words;
-	for (const char letter : g_terms.words) {
-		words += static_cast<char>(tolower(static_cast<unsigned char>(letter)));
-	}
-	g_terms.found.clear();
-	for (size_t i = 0; i < sizeof(kTerms) / sizeof(kTerms[0]); ++i) {
-		std::string all = std::string(kTerms[i].word) + " " + kTerms[i].text;
-		for (char& letter : all) {
-			letter = static_cast<char>(tolower(static_cast<unsigned char>(letter)));
-		}
-		bool   has = true;
-		size_t at  = 0;
-		while (has && at < words.size()) { // every typed word must be in it
-			size_t end = words.find(' ', at);
-			end        = end == std::string::npos ? words.size() : end;
-			has        = end == at || all.find(words.substr(at, end - at)) != std::string::npos;
-			at         = end + 1;
-		}
-		if (has) {
-			g_terms.found.push_back(i);
-		}
-	}
-	const size_t last = g_terms.found.size() > kTermRows ? g_terms.found.size() - kTermRows : 0;
-	g_terms.top       = g_terms.top > last ? last : g_terms.top;
+struct LegendItem {
+	std::string code, meaning, detail, insert;
+};
+struct LegendSec {
+	modbook::LegendSection sec {};
+	std::string            id, title;
+	std::vector<LegendItem> how, list; // UI thread
+	std::atomic<bool>       stale { true };
+};
+std::vector<LegendSec*> g_secs; // never freed (the UI thread may be reading one); added under g_secLock
+SRWLOCK                 g_secLock = SRWLOCK_INIT;
+
+struct LegendFound {
+	size_t sec;
+	bool   how;
+	size_t item;
+};
+struct LegendView {
+	int                      handle  = 0;
+	size_t                   sec     = 0;     // the section shown (index into g_secs)
+	int                      follows = -1;    // the tab on the other side the section was chosen for
+	std::string              words;           // the search
+	std::vector<LegendFound> found;
+	size_t                   top  = 0;
+	int                      card = -1; // the entry open as a card (index into found); -1: the list
+	std::string              note;      // said on the card (Insert refused ...)
+	bool                     stale = true;
+	std::atomic<int>         wantSec { 0 }; // showLegend: a section's handle, -1 follow the other side
+	std::string              wantCode;      // under g_secLock
+	int                      lastData = 0;  // the tab shown last on either side, the Legend not counted (UI thread)
+};
+LegendView g_legend;
+
+std::vector<LegendSec*> Secs() {
+	AcquireSRWLockShared(&g_secLock);
+	std::vector<LegendSec*> secs = g_secs;
+	ReleaseSRWLockShared(&g_secLock);
+	return secs;
 }
 
-void __cdecl TermsDraw(void*, modbook::Page* page) noexcept {
-	if (g_terms.found.empty() && g_terms.words.empty()) {
-		TermsFilter();
+std::string Lower(std::string text) {
+	for (char& letter : text) {
+		letter = static_cast<char>(tolower(static_cast<unsigned char>(letter)));
 	}
-	ApiImage(page, "SearchSlot", 210, 138, "PANEL\\Modals\\InputSlot");
-	ApiLabel(page, "Search", 250, 166, 660, 56, g_terms.words.empty() ? "$FontColorGoldYellow" : "$FontColorWhite", "left", 0, g_terms.words.empty() ? "Type to search: stat, func, op" : (g_terms.words + "_").c_str());
-	for (size_t i = 0; i < kTermRows; ++i) {
-		const size_t      at    = g_terms.top + i;
-		const bool        there = at < g_terms.found.size();
-		const int         y     = 268 + static_cast<int>(i) * 196;
-		const std::string n     = std::to_string(i);
-		ApiLabel(page, ("Word" + n).c_str(), 82, y, 990, 36, "$FontColorLightGold", "left", 0, there ? kTerms[g_terms.found[at]].word : "");
-		ApiLabel(page, ("Text" + n).c_str(), 120, y + 36, 950, 160, "$FontColorGoldYellow", "left", 1, there ? kTerms[g_terms.found[at]].text : "");
+	return text;
+}
+
+// Reads a section's entries again when it said they changed. UI thread.
+void LegendRead(LegendSec& s) {
+	if (!s.stale.exchange(false)) {
+		return;
+	}
+	for (int how = 1; how >= 0; --how) {
+		std::vector<LegendItem>& into = how != 0 ? s.how : s.list;
+		into.clear();
+		const int count = s.sec.count != nullptr ? s.sec.count(s.sec.user, how) : 0;
+		for (int i = 0; i < count && i < 100000; ++i) {
+			modbook::LegendEntry entry {};
+			if (s.sec.get == nullptr || s.sec.get(s.sec.user, how, i, &entry) == 0) {
+				continue;
+			}
+			into.push_back({ Text(entry.code), Text(entry.meaning), Text(entry.detail), Text(entry.insert) });
+		}
+	}
+	g_legend.stale = true;
+}
+
+// The other side (not the Legend's) and its tab shown now.
+Side* LegendOther() {
+	const int side = ApiSideOf(g_legend.handle);
+	return side < 0 ? nullptr : g_sides[side == modbook::kRight ? modbook::kLeft : modbook::kRight];
+}
+TabEntry* LegendOtherTab(int* handle = nullptr) {
+	Side* other = LegendOther();
+	if (other == nullptr) {
+		return nullptr;
+	}
+	const std::vector<int> tabs = TabsOf(*other);
+	if (tabs.empty()) {
+		return nullptr;
+	}
+	const int h = tabs[static_cast<size_t>(other->current) < tabs.size() ? static_cast<size_t>(other->current) : 0] + 1;
+	if (handle != nullptr) {
+		*handle = h;
+	}
+	return TabOf(h);
+}
+
+void LegendFilter() {
+	const std::vector<LegendSec*> secs = Secs();
+	for (LegendSec* sec : secs) {
+		LegendRead(*sec);
+	}
+	g_legend.found.clear();
+	const std::string words = Lower(g_legend.words);
+	if (words.empty()) { // the section shown: its "How it works" first, then its list
+		if (g_legend.sec < secs.size()) {
+			for (size_t i = 0; i < secs[g_legend.sec]->how.size(); ++i) {
+				g_legend.found.push_back({ g_legend.sec, true, i });
+			}
+			for (size_t i = 0; i < secs[g_legend.sec]->list.size(); ++i) {
+				g_legend.found.push_back({ g_legend.sec, false, i });
+			}
+		}
+	} else { // every section, the one shown first
+		for (size_t n = 0; n < secs.size(); ++n) {
+			const size_t at = (g_legend.sec + n) % secs.size();
+			for (int how = 1; how >= 0; --how) {
+				const std::vector<LegendItem>& items = how != 0 ? secs[at]->how : secs[at]->list;
+				for (size_t i = 0; i < items.size(); ++i) {
+					const std::string all = Lower(items[i].code + " " + items[i].meaning + " " + items[i].detail);
+					bool              has = true;
+					for (size_t from = 0; has && from < words.size();) { // every typed word must be in it
+						size_t end = words.find(' ', from);
+						end        = end == std::string::npos ? words.size() : end;
+						has        = end == from || all.find(words.substr(from, end - from)) != std::string::npos;
+						from       = end + 1;
+					}
+					if (has) {
+						g_legend.found.push_back({ at, how != 0, i });
+					}
+				}
+			}
+		}
+	}
+	g_legend.stale = false;
+}
+
+const LegendItem* LegendItemOf(const std::vector<LegendSec*>& secs, const LegendFound& f) {
+	if (f.sec >= secs.size()) {
+		return nullptr;
+	}
+	const std::vector<LegendItem>& items = f.how ? secs[f.sec]->how : secs[f.sec]->list;
+	return f.item < items.size() ? &items[f.item] : nullptr;
+}
+
+std::string Cut(const std::string& text, size_t most) {
+	return text.size() <= most ? text : text.substr(0, most - 3) + "...";
+}
+
+constexpr int    kLegendRow = 106;                 // an entry: the code line (36) and two lines of meaning (66), as the recipe list
+constexpr size_t kCodeMost = 56, kSecOneSlot = 12, kSecTwoSlots = 28; // letters: a code line; a section's title on one / two slots
+
+size_t LegendRows(const Page* page, int from) {
+	const int room = 1340 - (page != nullptr ? page->down : 0) - from;
+	return room > kLegendRow ? static_cast<size_t>(room / kLegendRow) : 1;
+}
+size_t g_legendRows = 10; // as many as the last page had room for
+
+// What a showLegend asked for, and the section that follows the tab on the other side.
+void LegendTake() {
+	const std::vector<LegendSec*> secs = Secs();
+	const int                     want = g_legend.wantSec.exchange(0);
+	if (want > 0 && static_cast<size_t>(want) <= secs.size()) {
+		AcquireSRWLockExclusive(&g_secLock);
+		const std::string code = std::move(g_legend.wantCode);
+		g_legend.wantCode.clear();
+		ReleaseSRWLockExclusive(&g_secLock);
+		g_legend.sec = static_cast<size_t>(want) - 1, g_legend.words.clear(), g_legend.card = -1, g_legend.top = 0, g_legend.stale = true;
+		LegendFilter();
+		for (size_t i = 0; !code.empty() && i < g_legend.found.size(); ++i) {
+			const LegendItem* item = LegendItemOf(secs, g_legend.found[i]);
+			if (item != nullptr && !g_legend.found[i].how && item->code == code) {
+				g_legend.top = i, g_legend.card = static_cast<int>(i);
+				break;
+			}
+		}
+		g_legend.follows = g_legend.lastData;
+		return;
+	}
+	const int handle = g_legend.lastData;
+	if (handle != g_legend.follows || want < 0) {
+		g_legend.follows = handle;
+		for (size_t i = 0; i < secs.size(); ++i) {
+			if (secs[i]->sec.follows != 0 && secs[i]->sec.follows == handle) {
+				if (g_legend.sec != i) {
+					g_legend.sec = i, g_legend.card = -1, g_legend.top = 0, g_legend.stale = true;
+				}
+				break;
+			}
+		}
+	}
+}
+
+void __cdecl LegendDraw(void*, modbook::Page* page) noexcept {
+	LegendTake();
+	for (LegendSec* sec : Secs()) {
+		if (sec->stale.load()) {
+			g_legend.stale = true;
+		}
+	}
+	if (g_legend.stale) {
+		LegendFilter();
+	}
+	const std::vector<LegendSec*> secs = Secs();
+	ApiSearch(page, g_legend.words.c_str(), "Type to search every section");
+	int y = modbook::kActionY;
+	for (size_t i = 0; i < secs.size(); ++i) { // a title longer than a 232 button holds (about 12 letters at this size) gets two slots, not a wrapped line
+		const std::string& title = secs[i]->title;
+		y = ApiAction(page, ("Sec" + std::to_string(i)).c_str(), Cut(title, kSecTwoSlots).c_str(), i == g_legend.sec ? "$FontColorWhite" : "$FontColorGoldYellow", title.size() > kSecOneSlot ? 2 : 1);
+	}
+	const LegendItem* card = g_legend.card >= 0 && static_cast<size_t>(g_legend.card) < g_legend.found.size() ? LegendItemOf(secs, g_legend.found[static_cast<size_t>(g_legend.card)]) : nullptr;
+	if (card != nullptr) { // the card: the entry's detail, Back, Insert
+		const LegendFound& f = g_legend.found[static_cast<size_t>(g_legend.card)];
+		static_cast<void>(ApiAction(page, nullptr, nullptr, nullptr, 0));
+		y = ApiAction(page, "Back", "Back", nullptr, 1);
+		const TabEntry* other = LegendOtherTab();
+		if (!card->insert.empty() && other != nullptr && other->tab.insert != nullptr && other->tab.editing != nullptr && other->tab.editing(other->tab.user) != 0) {
+			y = ApiAction(page, "Insert", ("Insert " + Cut(card->insert, 12)).c_str(), nullptr, 1);
+		}
+		ApiLabel(page, "CardCode", 82, y + 8, 990, 40, f.how ? "$FontColorLightGold" : "$FontColorWhite", "left", 0, (card->code + "   (" + secs[f.sec]->title + (f.how ? ", how it works)" : ")")).c_str());
+		ApiLabel(page, "CardText", 82, y + 56, 980, 1300 - page->down - (y + 56), "$FontColorGoldYellow", "left", 1, (card->detail.empty() ? card->meaning : card->detail).c_str());
+		ApiPager(page, 0, 0, g_legend.note.c_str());
+		return;
+	}
+	const int    from = y + 8;
+	const size_t rows = LegendRows(page, from);
+	g_legendRows      = rows;
+	const size_t last = g_legend.found.size() > rows ? g_legend.found.size() - rows : 0;
+	g_legend.top      = g_legend.top > last ? last : g_legend.top;
+	// Each entry is two lines, as the recipe list: the code (white; a How it works heading in
+	// light gold), then its meaning indented in the dim colour, wrapping to a third line.
+	for (size_t i = 0; i < rows; ++i) {
+		const size_t      at   = g_legend.top + i;
+		const LegendItem* item = at < g_legend.found.size() ? LegendItemOf(secs, g_legend.found[at]) : nullptr;
+		std::string       code, meaning;
+		const char*       color = "$FontColorWhite";
+		if (item != nullptr) {
+			const LegendFound& f = g_legend.found[at];
+			code    = Cut(item->code, kCodeMost) + (g_legend.words.empty() ? std::string() : "   (" + secs[f.sec]->title + ")");
+			meaning = item->meaning;
+			color   = f.how ? "$FontColorLightGold" : "$FontColorWhite";
+		}
+		const std::string n   = std::to_string(i);
+		const int         top = from + static_cast<int>(i) * kLegendRow;
+		ApiLabel(page, ("Code" + n).c_str(), 82, top, 970, 36, color, "left", 0, code.c_str());
+		ApiLabel(page, ("Meaning" + n).c_str(), 120, top + 36, 932, 66, "$FontColorGoldYellow", "left", 1, meaning.c_str());
+		ApiSpot(page, ("RowSpot" + n).c_str(), 82, top, 970, kLegendRow - 4, ("Row" + n).c_str(), "");
 	}
 	char text[80];
-	if (g_terms.found.empty()) {
-		snprintf(text, sizeof(text), "no term has all of these words");
+	if (secs.empty()) {
+		snprintf(text, sizeof(text), "no plugin has given the Legend a section");
+	} else if (g_legend.found.empty()) {
+		snprintf(text, sizeof(text), g_legend.words.empty() ? "this section is empty" : "nothing has all of these words");
 	} else {
-		snprintf(text, sizeof(text), "%zu - %zu of %zu", g_terms.top + 1, g_terms.top + kTermRows < g_terms.found.size() ? g_terms.top + kTermRows : g_terms.found.size(), g_terms.found.size());
+		snprintf(text, sizeof(text), "%zu - %zu of %zu", g_legend.top + 1, g_legend.top + rows < g_legend.found.size() ? g_legend.top + rows : g_legend.found.size(), g_legend.found.size());
 	}
-	ApiBar(page, 268, g_terms.top, kTermRows, g_terms.found.size());
-	ApiPager(page, g_terms.top > 0 ? 1 : 0, g_terms.top + kTermRows < g_terms.found.size() ? 1 : 0, text);
-}
-void __cdecl TermsClick(void*, const char* what) noexcept {
-	if (what != nullptr && strcmp(what, "Escape") == 0) {
-		ApiClose(modbook::kRight);
-	}
-}
-void __cdecl TermsKeys(void*, const char* typed) noexcept {
-	for (const char* at = typed; at != nullptr && *at != '\0'; ++at) {
-		if (*at == modbook::kKeyBackspace) {
-			if (!g_terms.words.empty()) {
-				g_terms.words.pop_back();
-			}
-		} else if (static_cast<unsigned char>(*at) >= 0x20 && *at != modbook::kKeyDelete && *at != '"' && *at != '\\' && g_terms.words.size() < 34) {
-			g_terms.words += *at;
-		}
-	}
-	g_terms.top = 0;
-	TermsFilter();
-	ApiRedraw(g_terms.handle);
-}
-void __cdecl TermsMove(void*, int pages, int rows, int jump) noexcept {
-	const long long count = static_cast<long long>(g_terms.found.size());
-	const long long last  = count > static_cast<long long>(kTermRows) ? count - static_cast<long long>(kTermRows) : 0;
-	long long       top   = static_cast<long long>(g_terms.top) + pages * static_cast<long long>(kTermRows) + rows;
-	top                   = jump < 0 ? 0 : jump > 0 ? last : top;
-	g_terms.top           = static_cast<size_t>(top < 0 ? 0 : top > last ? last : top);
-	ApiRedraw(g_terms.handle);
+	ApiBar(page, from, g_legend.top, rows, g_legend.found.size());
+	ApiPager(page, g_legend.top > 0 ? 1 : 0, g_legend.top + rows < g_legend.found.size() ? 1 : 0, text);
 }
 
-void AddTermsTab() {
-	const modbook::Tab tab { sizeof(modbook::Tab), modbook::kRight, "terms", "Property/Stat Terms", nullptr, TermsDraw, TermsClick, TermsKeys, TermsMove, nullptr, nullptr, "General" };
-	g_terms.handle = ApiAddTab(&tab);
+void __cdecl LegendClick(void*, const char* what) noexcept {
+	const std::string click = what != nullptr ? what : "";
+	const std::vector<LegendSec*> secs = Secs();
+	if (click == "Escape") {
+		if (g_legend.card >= 0) {
+			g_legend.card = -1, g_legend.note.clear();
+		} else {
+			ApiClose(ApiSideOf(g_legend.handle));
+			return;
+		}
+	} else if (click.rfind("Sec", 0) == 0) {
+		const size_t at = static_cast<size_t>(atoi(click.c_str() + 3));
+		if (at < secs.size()) {
+			g_legend.sec = at, g_legend.words.clear(), g_legend.card = -1, g_legend.top = 0, g_legend.note.clear(), g_legend.stale = true;
+		}
+	} else if (click.rfind("Row", 0) == 0) {
+		const size_t at = g_legend.top + static_cast<size_t>(atoi(click.c_str() + 3));
+		if (at < g_legend.found.size()) {
+			g_legend.card = static_cast<int>(at), g_legend.note.clear();
+		}
+	} else if (click == "Back") {
+		g_legend.card = -1, g_legend.note.clear();
+	} else if (click == "Insert" && g_legend.card >= 0 && static_cast<size_t>(g_legend.card) < g_legend.found.size()) {
+		const LegendItem* item  = LegendItemOf(secs, g_legend.found[static_cast<size_t>(g_legend.card)]);
+		TabEntry*         other = LegendOtherTab();
+		int               taken = 0;
+		if (item != nullptr && other != nullptr && other->tab.insert != nullptr) {
+			taken = other->tab.insert(other->tab.user, item->insert.c_str());
+		}
+		g_legend.note = taken != 0 ? "'" + Cut(item->insert, 30) + "' put into the cell" : "no cell is being edited on the other side";
+		Side* side = LegendOther();
+		if (taken != 0 && side != nullptr) {
+			side->dirty.store(true);
+		}
+	}
+	ApiRedraw(g_legend.handle);
+}
+
+void __cdecl LegendKeys(void*, const char* typed) noexcept {
+	for (const char* at = typed; at != nullptr && *at != '\0'; ++at) {
+		if (*at == modbook::kKeyBackspace) {
+			if (!g_legend.words.empty()) {
+				g_legend.words.pop_back();
+			}
+		} else if (*at == modbook::kKeyDelete) { // Delete empties the search, as on every other tab
+			g_legend.words.clear();
+		} else if (static_cast<unsigned char>(*at) >= 0x20 && *at != modbook::kKeyDelete && *at != '"' && *at != '\\' && g_legend.words.size() < 34) {
+			g_legend.words += *at;
+		}
+	}
+	g_legend.top = 0, g_legend.card = -1, g_legend.note.clear(), g_legend.stale = true;
+	ApiRedraw(g_legend.handle);
+}
+
+void __cdecl LegendMove(void*, int pages, int rows, int jump) noexcept {
+	if (g_legend.card >= 0) {
+		return;
+	}
+	const size_t    shown = g_legendRows;
+	const long long count = static_cast<long long>(g_legend.found.size());
+	const long long last  = count > static_cast<long long>(shown) ? count - static_cast<long long>(shown) : 0;
+	long long       top   = static_cast<long long>(g_legend.top) + pages * static_cast<long long>(shown) + rows;
+	top                   = jump < 0 ? 0 : jump > 0 ? last : top;
+	g_legend.top          = static_cast<size_t>(top < 0 ? 0 : top > last ? last : top);
+	ApiRedraw(g_legend.handle);
+}
+
+// Told by Tell: a side shows another tab now. The Legend follows the tab shown last on either
+// side, not counting itself (Stats on the right, then the Legend in its place: the Stats section).
+void LegendFollow(const Side& s) {
+	if (g_legend.handle == 0) {
+		return;
+	}
+	const std::vector<int> tabs = TabsOf(const_cast<Side&>(s));
+	if (tabs.empty()) {
+		return;
+	}
+	const int handle = tabs[static_cast<size_t>(s.current) < tabs.size() ? static_cast<size_t>(s.current) : 0] + 1;
+	if (handle != g_legend.handle) {
+		g_legend.lastData = handle;
+		ApiRedraw(g_legend.handle);
+	}
+}
+
+int __cdecl ApiAddLegend(const modbook::LegendSection* section) noexcept {
+	if (section == nullptr || section->size < offsetof(modbook::LegendSection, get) + sizeof(section->get) || section->id == nullptr || section->title == nullptr || section->count == nullptr || section->get == nullptr) {
+		LogF("a legend section was refused: it is not filled in (size, id, title, count and get are needed)");
+		return 0;
+	}
+	auto* sec = new LegendSec;
+	memcpy(&sec->sec, section, sizeof(modbook::LegendSection));
+	sec->id = section->id, sec->title = section->title;
+	sec->sec.id = sec->id.c_str(), sec->sec.title = sec->title.c_str();
+	AcquireSRWLockExclusive(&g_secLock);
+	int handle = 0;
+	for (size_t i = 0; i < g_secs.size() && handle == 0; ++i) {
+		if (g_secs[i]->id == sec->id) { // the same section again: its callbacks take the place (the old one stays readable)
+			g_secs[i] = sec;
+			handle    = static_cast<int>(i) + 1;
+		}
+	}
+	if (handle == 0) {
+		// Mod Book's own Terms stay last
+		const bool terms = !g_secs.empty() && g_secs.back()->id == "terms" && sec->id != "terms";
+		g_secs.insert(terms ? g_secs.end() - 1 : g_secs.end(), sec);
+		handle = terms ? static_cast<int>(g_secs.size()) - 1 : static_cast<int>(g_secs.size());
+	}
+	ReleaseSRWLockExclusive(&g_secLock);
+	LogF("legend section '%s' (%s) added", sec->id.c_str(), sec->title.c_str());
+	ApiRedraw(g_legend.handle);
+	return handle;
+}
+
+LegendSec* SecOf(int handle) {
+	AcquireSRWLockShared(&g_secLock);
+	LegendSec* sec = handle >= 1 && static_cast<size_t>(handle) <= g_secs.size() ? g_secs[static_cast<size_t>(handle) - 1] : nullptr;
+	ReleaseSRWLockShared(&g_secLock);
+	return sec;
+}
+
+void __cdecl ApiLegendChanged(int handle) noexcept {
+	if (LegendSec* sec = SecOf(handle); sec != nullptr) {
+		sec->stale.store(true);
+		ApiRedraw(g_legend.handle);
+	}
+}
+
+void __cdecl ApiShowLegend(int handle, const char* code) noexcept {
+	if (g_legend.handle == 0) {
+		return;
+	}
+	if (code == nullptr && ApiIsShown(g_legend.handle) != 0 && (handle == 0 || static_cast<size_t>(handle) - 1 == g_legend.sec)) {
+		ApiClose(ApiSideOf(g_legend.handle)); // a key toggles it
+		return;
+	}
+	AcquireSRWLockExclusive(&g_secLock);
+	g_legend.wantCode = code != nullptr ? code : "";
+	ReleaseSRWLockExclusive(&g_secLock);
+	g_legend.wantSec.store(handle > 0 ? handle : -1);
+	ApiOpen(g_legend.handle);
+	ApiRedraw(g_legend.handle);
+}
+
+int __cdecl TermsCount(void*, int how) noexcept {
+	return how != 0 ? 0 : static_cast<int>(sizeof(kTerms) / sizeof(kTerms[0]));
+}
+int __cdecl TermsGet(void*, int how, int index, modbook::LegendEntry* entry) noexcept {
+	static std::string meaning; // lives until the next get, as the Api asks
+	if (how != 0 || index < 0 || index >= TermsCount(nullptr, 0) || entry == nullptr) {
+		return 0;
+	}
+	const std::string text = kTerms[index].text;
+	const size_t      stop = text.find(". ");
+	meaning                = stop == std::string::npos ? text : text.substr(0, stop);
+	*entry                 = { kTerms[index].word, meaning.c_str(), kTerms[index].text, nullptr };
+	return 1;
+}
+
+void AddLegendTab() {
+	const modbook::Tab tab { sizeof(modbook::Tab), modbook::kRight, "legend", "Legend", nullptr, LegendDraw, LegendClick, LegendKeys, LegendMove, nullptr, nullptr, "General", nullptr, nullptr };
+	g_legend.handle = ApiAddTab(&tab);
+	const modbook::LegendSection terms { sizeof(modbook::LegendSection), "terms", "Terms", 0, nullptr, TermsCount, TermsGet };
+	static_cast<void>(ApiAddLegend(&terms));
 }
 
 constexpr modbook::Api kApi {
 	sizeof(modbook::Api), modbook::kApiVersion, ApiAddTab, ApiRedraw, ApiOpen, ApiToggle, ApiClose, ApiIsShown, ApiLabel, ApiSpot, ApiButton, ApiImage, ApiBar, ApiPager, ApiTitle, ApiSideOf,
+	ApiAction, ApiSearch, ApiAddLegend, ApiLegendChanged, ApiShowLegend,
 };
 
 // ---------------------------------------------------------------- set-up
@@ -2333,7 +2919,7 @@ void SetUp() {
 	g_off.clear();
 	InPlaceSetUp();
 	LoadOrder();
-	AddTermsTab();
+	AddLegendTab();
 
 	const D2RL::InputService* input = nullptr;
 	std::string               keys  = "no keys (this D2RLoader has no input service)";

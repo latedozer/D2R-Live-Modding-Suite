@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
 	}
 	Check(propCodes.size() > 200 && typeCodes.size() > 50, "the game's property and item type codes are read (" + std::to_string(propCodes.size()) + ", " + std::to_string(typeCodes.size()) + ")");
 	affix::Names game; // what the loader puts in an empty cell (any value no code has)
-	game.props = propCodes.data(), game.propCount = propCodes.size(), game.types = typeCodes.data(), game.typeCount = typeCodes.size();
+	game.props = &propCodes, game.types = &typeCodes;
 	game.noProp = -1, game.noType = 0xffff;
 
 	for (const char* name : { "MagicPrefix.txt", "MagicSuffix.txt" }) {
@@ -177,6 +177,56 @@ int main(int argc, char** argv) {
 	cells[affix::kFrequencyCell] = "1", cells[affix::kModCell] = "#5";
 	Check(affix::Build(cells, game, next, problem) && affix::Get(next, affix::kFields[affix::kModCell]) == 5, "a property row by number (#5) is taken");
 
+	{ // 2026-11-25 21:38 crash: the property names are read again after Live Tables grew the table (the
+	  // vector's elements move); an affix read afterwards must see the new list, not freed memory
+		std::vector<std::string> codes = propCodes;
+		affix::Names             live  = game;
+		live.props                     = &codes;
+		std::vector<uint8_t>     row(affix::kRow, 0);
+		affix::Put(row.data(), affix::kFields[affix::kModCell], static_cast<long>(codes.size())); // the row about to be grown
+		codes.shrink_to_fit();
+		const std::string* before = codes.data();
+		codes.push_back("%dmg"); // the grown row: the elements move (capacity was exactly full)
+		const affix::Cells cells = affix::Read(row.data(), live);
+		Check(codes.data() != before && cells[affix::kModCell] == "%dmg", "names re-read after a grow (the list moved): an affix naming the new property reads '%dmg'");
+	}
+	{ // affix Disable / Enable (0.11.1): spawnable and frequency 0, then both back; nothing else changes
+		std::vector<uint8_t> row(affix::kRow, 0);
+		for (size_t i = 0; i < row.size(); ++i) {
+			row[i] = static_cast<uint8_t>(i * 7 + 3); // every byte something
+		}
+		affix::Put(row.data(), affix::kFields[affix::kSpawnCell], 1);
+		affix::Put(row.data(), affix::kFields[affix::kFrequencyCell], 4);
+		const std::vector<uint8_t> orig = row;
+		affix::Off(row.data());
+		const bool off  = affix::IsOff(row.data()) && !affix::IsOff(orig.data());
+		size_t     diff = 0;
+		for (size_t i = 0; i < row.size(); ++i) {
+			diff += row[i] != orig[i] ? 1 : 0;
+		}
+		affix::On(row.data(), orig.data());
+		Check(off && diff == 2 && row == orig, "affix Disable: spawnable and frequency 0 (only those 2 bytes); Enable: the row is byte for byte what it was");
+	}
+	{ // the classic block: rows before the files' Expansion line (version 0 / blank), as the game holds them (Expansion dropped)
+		for (const char* name : { "MagicPrefix.txt", "MagicSuffix.txt" }) {
+			const Table          t   = ReadTable(folder + name);
+			const int            col = Column(t, "version");
+			std::vector<uint8_t> rows;
+			size_t               expansion = 0;
+			for (size_t r = 1; r < t.size(); ++r) {
+				if (Cell(t, r, 0) == "Expansion") {
+					expansion = rows.size() / affix::kRow; // the game drops this line
+					continue;
+				}
+				std::vector<uint8_t> row(affix::kRow, 0);
+				const uint16_t       v = static_cast<uint16_t>(atoi(Cell(t, r, col).c_str()));
+				memcpy(row.data() + 0x22, &v, 2);
+				rows.insert(rows.end(), row.begin(), row.end());
+			}
+			const size_t end = affix::ClassicEnd(rows.data(), rows.size() / affix::kRow);
+			Check(expansion > 0 && end == expansion, std::string(name) + ": the classic block ends where the Expansion line was (row " + std::to_string(end) + ")");
+		}
+	}
 	printf(g_failed == 0 ? "ALL PASSED\n" : "FAILURES: %d\n", g_failed);
 	return g_failed == 0 ? 0 : 1;
 }

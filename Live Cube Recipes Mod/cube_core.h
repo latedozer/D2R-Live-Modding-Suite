@@ -132,6 +132,7 @@ struct Outcome {
 	int                      refused  = 0; // lines the game could not read
 	std::vector<LineStatus>  status;       // per line of the file
 	std::vector<std::string> problems;
+	std::vector<std::string> notes;        // ExactList: lines the cube takes that are likely not what was meant (AmountNotes)
 };
 
 // True when two recipes ask for the same thing: everything in front of the outputs but the
@@ -172,6 +173,9 @@ struct Shown {
 	std::string title;  // the description
 	std::string detail; // the result first, then what goes in: "r11  <-  r10,qty=3 + gcy"
 	std::string search; // both, lower case
+	// legend entries only: the code alone ("shld", "op 18"), its one-line meaning, and what a click
+	// puts into the cell being edited ("shld", "18"; empty: nothing to put in)
+	std::string code, meaning, insert;
 };
 // One entry per non-blank line of a recipe sheet (all-recipes.txt's text).
 std::vector<Shown> Summaries(const Sheet& sheet);
@@ -195,6 +199,13 @@ struct LegendTables {
 // `values` = the columns and what their values mean (every op, param's stat numbers, ...).
 struct Shown;
 std::string Legend(const LegendTables& tables, std::vector<Shown>* codes = nullptr, std::vector<Shown>* values = nullptr);
+// The legend's longer explanations ("How it works" in the Mod Book's Legend), one list per
+// section: 0 = the words and codes, 1 = the columns. Each: a heading and its text.
+struct HowItWorks {
+	const char* title;
+	const char* text;
+};
+std::vector<HowItWorks> LegendHow(int section);
 
 // A recipe line as cells, for the in-game editor: the description, one cell per kColumns entry,
 // and whether it is a remove line.
@@ -256,6 +267,21 @@ struct DefaultsIndex {
 	std::unordered_map<uint64_t, std::vector<const uint8_t*>> ingredients, whole;
 };
 DefaultsIndex IndexDefaults(Game& game, const Layout& layout, const Sheet& defaults, Cache& cache);
+// What a line the game reads still gets wrong: a mod (mod 1 ... c mod 5) with a property code
+// whose min, max and param are all blank gives the property at 0 - nothing (the game's own and
+// the mod's recipes never leave all three blank). One note per such mod; empty when none.
+std::vector<std::string> AmountNotes(const Header& header, std::string_view line);
+// A row Live Tables renamed: every cell that names `oldName` (any case) gets `newName` - the mod
+// cells for a property code (stats = false), the param cell for a stat name (stats = true).
+// RenameInText keeps every other byte of the file as it was (line ends too) and returns how many
+// cells changed; `where` gets "line 2 (Small Charm <- smca) mod 1" for each.
+int RenameInText(std::string& text, bool stats, std::string_view oldName, std::string_view newName, std::vector<std::string>* where);
+struct Cells;
+int RenameInCells(Cells& cells, bool stats, std::string_view oldName, std::string_view newName);
+// Which column of a compiled record names row `from` of a table or a row after it (a middle row
+// that goes moves every later one): stats = the param of a recipe with op 3-26 (the ops whose param is a stat), else a mod cell
+// naming a property ({u16 id, u16 kind}, kind 0; a property group is kind != 0). kColumns index, or -1.
+int NamesRow(const Layout& layout, const uint8_t* row, bool stats, uint32_t from);
 // One line of the user's list: what ExactList makes of it (Blank, Idle, Refused or Added) and
 // what Compare says of it (own, isDefault).
 struct LineFacts {

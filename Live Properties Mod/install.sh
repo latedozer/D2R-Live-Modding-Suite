@@ -22,7 +22,21 @@ if [ "${1:-}" = "remove" ]; then
 	exit 0
 fi
 [ -f build/d2rl-live-properties.dll ] || { echo "build it first: ./build.sh"; exit 1; }
+VERSION="$(sed -n 's/^constexpr const char\* kVersion = "\(.*\)";/\1/p' plugin.cpp)"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+NEW_SHA="$(sha256sum build/d2rl-live-properties.dll | cut -d' ' -f1)"
+if [ -f "$DEST/d2rl-live-properties.dll" ]; then
+	# the DLL it replaces is kept, so it can be put back
+	PREV="../Suite .dlls/previous"
+	mkdir -p "$PREV"
+	OLD_SHA="$(sha256sum "$DEST/d2rl-live-properties.dll" | cut -d' ' -f1)"
+	cp "$DEST/d2rl-live-properties.dll" "$PREV/d2rl-live-properties.replaced-$STAMP-${OLD_SHA:0:8}.dll"
+	echo "kept the old one as $PREV/d2rl-live-properties.replaced-$STAMP-${OLD_SHA:0:8}.dll"
+fi
 cp build/d2rl-live-properties.dll "$DEST/d2rl-live-properties.dll.installing"
 mv "$DEST/d2rl-live-properties.dll.installing" "$DEST/d2rl-live-properties.dll"
+mkdir -p "$GAME/d2rloader/live-suite"
+printf '%s\tlive-properties\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$VERSION" "$NEW_SHA" >> "$GAME/d2rloader/live-suite/installed.txt"
 ls -la "$DEST/d2rl-live-properties.dll"
+echo "installed $VERSION (sha256 $NEW_SHA); noted in d2rloader/live-suite/installed.txt"
 echo "installed. Start the game, enter a game, open the Mod Book (Ctrl+B) or type prop in the console"
